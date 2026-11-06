@@ -5,7 +5,7 @@
 ## 1. 当前定位
 
 - 幼年期M0–M3工程出口全部验收：至少两种pass组合、真实算法替换、Editor/Runtime共享调参、独立无窗口GPU复现、两套实验与架构保留/调整ADR齐备。成长期未开工，仍不是完整通用引擎。
-- 版本0.6.0，M2基准1fad4a6已正常提交推送；本轮M3代码/知识已通过六组合验收，Git发布收尾进行。最后提交信息以Git和本节最终发布记录为准；.codebuddy工具数据保留但不提交。
+- 版本0.6.0，M2基准1fad4a6与整个M3实现ecec75d已正常提交推送至既有origin/main；Git确认HEAD与origin/main无差异。此后仅本次发布交接文档更新，最后文档提交以Git log为准；.codebuddy工具数据保留但不提交。
 - 2026-11-06所有者授权随时向既有GitHub origin正常提交/推送已验证成果，并要求完成整个M3再停下；没有改写历史、变更远端或选择许可证。
 - 已实现：M2窗口/索引相机/共享参数/DXC/F5链、direct/RTT-copy/grayscale、两入口共享scene/post独立计时、独立offscreen有限GPU与最后帧PNG、含两generation和frame_number的JSON、pure headless及safe shutdown。
 - 未实现：通用网格/资产加载、模型变换/深度附件、场景、Editor UI、Render Graph、物理、后台编译或通用材质/Profiler。PNG捕获不是持续正常帧readback，无跨平台/多GPU承诺。
@@ -21,10 +21,10 @@
 | M2-003 | Done | 最小索引网格与相机变换 | 第5部分、ADR-0007与EXP-0001；六组合验收通过 |
 | M3-001 | Done | direct对照、颜色纹理与copy/grayscale全屏pass | 第6部分、ADR-0008、同输入图像与实际post替换 |
 | M3-002 | Done | 独立无窗口GPU与PNG捕获 | 两入口无HWND/swapchain/Present；有限帧与PNG/JSON复现 |
-| M3-003 | Done | 架构复盘与完整阶段验收 | 两套实验、ADR-0009、六组合GPU/GBV均通过；Git收尾见定位 |
+| M3-003 | Done | 架构复盘与完整阶段验收 | 两套实验、ADR-0009、六组合GPU/GBV均通过；ecec75d已推送 |
 | G1-001 | Ready | 成长期首切片：最小深度附件与遮挡对照 | 仅固定几何深度正确性/生命周期；开工细化，尚未实现 |
 
-整个M3已完成编码和验收，当前仅Git发布/最终交接收尾；不继续启动成长期代码。无场景、资产、Graph、UI或新框架。任务与交接规则见 [知识管理](KNOWLEDGE.md)。
+当前无活动编码任务；整个M3编码、验收与Git正常发布完成，按要求停止本轮，不启动成长期。无场景、资产、Graph、UI或新框架。任务与交接规则见 [知识管理](KNOWLEDGE.md)。
 
 ## 3. M2-001验收
 

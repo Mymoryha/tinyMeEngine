@@ -2,6 +2,12 @@
 
 倒序追加，只记值得长期保留的节点。当前任务状态见 [STATE](STATE.md)，决定原文见 [ADR 索引](Decisions/README.md)。不以本文件复制全部代码改动或会话记录。
 
+## 2026-11-06 — 整个M3正常推送完成
+
+- 按所有者新授权，M2基准1fad4a6与完整M3实现ecec75d已正常提交并推送既有origin/main，Git本地/远端差计数0/0。没有force、amend、改配置、跳过hooks或带入.codebuddy/二进制/凭据。
+- M3实现37个文本文件，最终双配置128/128默认、67/67 Editor OFF、138/138 GPU opt-in及两个gpu-test完整入口通过；格式/IDE诊断/UTF-8 LF/相对链接检查通过。随后仅更新该发布交接知识，不改已验收实现。
+- 按要求停止于整个M3完成，不继续成长期编码；当前状态/限制/复现由STATE接手，agent延迟消息不能覆盖已验收文件。
+
 ## 2026-11-06 — 整个M3验收：幼年期工程出口完成
 
 - M3-001/002/003全部实现验收，不在RTT完成后停止。0.6.0基于已发布M2 1fad4a6；本轮已完成两种pass组合、copy/grayscale及实际post shader反色替换/恢复、Editor/Runtime共享调参、真正无窗口GPU、PNG/JSON复现与两套实验。

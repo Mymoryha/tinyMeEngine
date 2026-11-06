@@ -2,7 +2,7 @@
 
 - 日期：2026-11-06
 - 状态：整个M3工程验收与两入口六组优化实采已完成；最终检查数/日志和发布状态见 [STATE](../../Docs/STATE.md)
-- 基准：M2已发布1fad4a6；本轮0.6.0源码尚未提交。与 [EXP-0001](../EXP-0001-triangle/README.md) 组成两套不同pass实验。
+- 基准：M2已发布1fad4a6；本轮0.6.0实现ecec75d已正常提交推送。与 [EXP-0001](../EXP-0001-triangle/README.md) 组成两套不同pass实验。
 - 决策：[ADR-0008](../../Docs/Decisions/ADR-0008-explicit-passes-and-offscreen-gpu.md)
 
 ## 输入、输出和边界
