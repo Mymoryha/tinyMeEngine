@@ -326,6 +326,88 @@ void TestReport()
     CheckRejected([&]() { static_cast<void>(tinyme::RunWindowedSession(L"invalid", options)); },
                   "Existing session report rejected before GPU");
 }
+void TestM3Report()
+{
+    tinyme::tests::ShaderFixture fixture;
+    fixture.Write(L"scene.hlsl", "source checked without compilation");
+    fixture.Write(L"post.hlsl", "source checked without compilation");
+    tinyme::WindowedRunOptions options;
+    options.offscreen = true;
+    options.frame_limit = 2;
+    options.profile = {true, 0, 2};
+    options.width = 17;
+    options.height = 13;
+    options.postprocess = tinyme::PostProcess::Grayscale;
+    options.shader_path = fixture.Path(L"scene.hlsl");
+    options.post_shader_path = fixture.Path(L"post.hlsl");
+    options.capture_path = fixture.Path(L"结果.png");
+    tinyme::ValidateGpuSessionOptions(options);
+    Check(true, "Valid offscreen preflight does not create GPU");
+    const std::array<tinyme::FrameTiming, 2> samples{
+        {{0, 1, {17, 13}, 1.0, 2.0, 1, 3, 4.0, tinyme::PostProcess::Grayscale},
+         {0, 1, {17, 13}, 3.0, 6.0, 2, 3, 8.0, tinyme::PostProcess::Grayscale}}};
+    const auto json =
+        tinyme::BuildProfileReport(options, {"test", "test", 1000}, {17, 13}, L"test", 1, false,
+                                   {true, false, false, 0, 0, true}, samples, {}, 3);
+    Check(json.find("\"mode\":\"offscreen\"") != std::string::npos &&
+              json.find("\"window_created\":false") != std::string::npos &&
+              json.find("\"vsync\":false") != std::string::npos,
+          "Offscreen reports no window or VSYNC");
+    Check(json.find("\"gpu_post\":{\"count\":2,\"mean_ms\":6") != std::string::npos &&
+              json.find("\"gpu_pass\":{\"count\":2,\"mean_ms\":4") != std::string::npos,
+          "Scene and post statistics remain independent");
+    Check(json.find("\"pass_order\":[\"scene\",\"postprocess\"]") != std::string::npos &&
+              json.find("\"post_generation\":3") != std::string::npos,
+          "Pass order and post generation serialized");
+    Check(json.find("\"presentation\":0") != std::string::npos &&
+              json.find("\"frame_number\":2") != std::string::npos &&
+              json.find("\"gpu_post_ms\":8") != std::string::npos,
+          "Offscreen frames do not invent presentations");
+    Check(json.find("\"saved\":true") != std::string::npos &&
+              json.find("\"pixel_format\":\"RGBA8_UNORM\"") != std::string::npos,
+          "Capture status is explicit not assumed");
+    auto bad = options;
+    bad.offscreen = false;
+    CheckRejected([&]() { tinyme::ValidateGpuSessionOptions(bad); },
+                  "Windowed capture rejected without GPU");
+    bad = options;
+    bad.frame_limit = 0;
+    CheckRejected([&]() { tinyme::ValidateGpuSessionOptions(bad); },
+                  "Offscreen requires finite frame budget");
+    bad = options;
+    bad.width = 2049;
+    CheckRejected([&]() { tinyme::ValidateGpuSessionOptions(bad); },
+                  "Capture dimensions have explicit resource budget");
+    bad = options;
+    bad.report_path = fixture.Path(L"./结果.png");
+    CheckRejected([&]() { tinyme::ValidateGpuSessionOptions(bad); },
+                  "Aliased capture/report paths rejected before GPU");
+    bad = options;
+    bad.postprocess = static_cast<tinyme::PostProcess>(99);
+    CheckRejected([&]() { tinyme::ValidateGpuSessionOptions(bad); },
+                  "Invalid programmatic pass selection rejected");
+    bad = options;
+    bad.capture_path = fixture.Path(L"missing/结果.png");
+    CheckRejected([&]() { tinyme::ValidateGpuSessionOptions(bad); },
+                  "Missing capture parent rejected before GPU");
+    for (const auto* name : {L"output.png.", L"output.png ", L"output.png:stream"})
+    {
+        bad = options;
+        bad.capture_path = fixture.Path(name);
+        CheckRejected([&]() { tinyme::ValidateGpuSessionOptions(bad); },
+                      "Win32 trailing-dot/space and ADS outputs rejected before GPU");
+    }
+    options.offscreen = false;
+    options.capture_path.clear();
+    options.postprocess = tinyme::PostProcess::None;
+    options.post_shader_path.clear();
+    const auto direct =
+        tinyme::BuildProfileReport(options, {}, {17, 13}, L"test", 1, true, {}, samples);
+    Check(direct.find("\"gpu_post\":null") != std::string::npos &&
+              direct.find("\"post_compiler\":null") != std::string::npos &&
+              direct.find("\"pass_order\":[\"scene\"]") != std::string::npos,
+          "Direct path never claims unused post resources or measurements");
+}
 } // namespace
 
 int main()
@@ -335,6 +417,7 @@ int main()
         TestReport();
         TestReportIoFailures();
         TestConcurrentReports();
+        TestM3Report();
         std::cout << "profile_contracts checks=" << checks << " failures=0 no_gpu=1\n";
         return 0;
     }

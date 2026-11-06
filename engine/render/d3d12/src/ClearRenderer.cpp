@@ -9,6 +9,7 @@
 #include <dxgidebug.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -84,6 +85,7 @@ struct ClearRenderer::Impl
     {
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12Resource> buffer;
+        ComPtr<ID3D12Resource> scene;
         UINT64 last_fence = 0;
     };
 
@@ -103,8 +105,19 @@ struct ClearRenderer::Impl
     D3D12_VERTEX_BUFFER_VIEW triangle_vertex_view{};
     D3D12_INDEX_BUFFER_VIEW triangle_index_view{};
     TriangleGeometryInfo geometry_info;
+    std::array<float, 4> optimized_clear{0.025F, 0.055F, 0.09F, 1.0F};
     std::uint64_t pipeline_generation = 0;
     std::uint64_t presentations = 0;
+    std::uint64_t submitted_frames = 0;
+    std::uint64_t post_generation = 0;
+    ComPtr<ID3D12RootSignature> post_root;
+    ComPtr<ID3D12PipelineState> post_pipeline;
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    ComPtr<ID3D12Resource> capture_readback;
+    UINT srv_stride = 0;
+    UINT last_frame_index = 0;
+    bool offscreen = false;
+    bool output_valid = false;
     RendererInfo renderer_info;
     std::unique_ptr<GpuTimer> timer;
     ComPtr<ID3D12DescriptorHeap> rtv_heap;
@@ -149,12 +162,17 @@ struct ClearRenderer::Impl
         Check(result, operation);
     }
 
-    void Initialize(HWND hwnd, WindowSize initial_size, RendererOptions renderer_options)
+    void Initialize(HWND hwnd, WindowSize initial_size, RendererOptions renderer_options,
+                    bool gpu_only = false)
     {
-        if (!IsWindow(hwnd) || initial_size.width == 0 || initial_size.height == 0)
+        if ((!gpu_only && !IsWindow(hwnd)) || initial_size.width == 0 || initial_size.height == 0 ||
+            initial_size.width > kMaxRenderDimension || initial_size.height > kMaxRenderDimension ||
+            !IsValid(renderer_options.postprocess))
         {
-            throw std::invalid_argument("Renderer requires a live HWND and nonzero client size.");
+            throw std::invalid_argument(
+                "Renderer requires a valid target, mode and size in [1,2048].");
         }
+        offscreen = gpu_only;
         options = renderer_options;
         options.debug_layer = options.debug_layer || options.gpu_validation;
         size = initial_size;
@@ -262,26 +280,38 @@ struct ClearRenderer::Impl
               "CreateCommandList");
         Check(commands->Close(), "Initial command list Close");
         D3D12_DESCRIPTOR_HEAP_DESC heap_description{};
-        heap_description.NumDescriptors = kBufferCount;
+        heap_description.NumDescriptors = kBufferCount * 2;
         heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         Check(device->CreateDescriptorHeap(&heap_description, IID_PPV_ARGS(&rtv_heap)),
               "Create RTV heap");
         rtv_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-        DXGI_SWAP_CHAIN_DESC1 swap_description{};
-        swap_description.Width = size.width;
-        swap_description.Height = size.height;
-        swap_description.Format = kBackBufferFormat;
-        swap_description.SampleDesc.Count = 1;
-        swap_description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        swap_description.BufferCount = kBufferCount;
-        swap_description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        ComPtr<IDXGISwapChain1> initial_swapchain;
-        Check(factory->CreateSwapChainForHwnd(queue.Get(), hwnd, &swap_description, nullptr,
-                                              nullptr, &initial_swapchain),
-              "CreateSwapChainForHwnd");
-        Check(initial_swapchain.As(&swapchain), "IDXGISwapChain3");
-        Check(factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER), "MakeWindowAssociation");
+        if (!offscreen)
+        {
+            DXGI_SWAP_CHAIN_DESC1 swap_description{};
+            swap_description.Width = size.width;
+            swap_description.Height = size.height;
+            swap_description.Format = kBackBufferFormat;
+            swap_description.SampleDesc.Count = 1;
+            swap_description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            swap_description.BufferCount = kBufferCount;
+            swap_description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+            ComPtr<IDXGISwapChain1> initial_swapchain;
+            Check(factory->CreateSwapChainForHwnd(queue.Get(), hwnd, &swap_description, nullptr,
+                                                  nullptr, &initial_swapchain),
+                  "CreateSwapChainForHwnd");
+            Check(initial_swapchain.As(&swapchain), "IDXGISwapChain3");
+            Check(factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER),
+                  "MakeWindowAssociation");
+        }
+        D3D12_DESCRIPTOR_HEAP_DESC srv_description{};
+        srv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        srv_description.NumDescriptors = kBufferCount;
+        srv_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        CheckDevice(device->CreateDescriptorHeap(&srv_description, IID_PPV_ARGS(&srv_heap)),
+                    "Create scene SRV heap");
+        srv_stride =
+            device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         CreateBuffers();
         if (options.profiling)
         {
@@ -289,8 +319,11 @@ struct ClearRenderer::Impl
             renderer_info.timestamp_frequency = timer->GetFrequency();
             std::cout << "timestamp_frequency_hz=" << renderer_info.timestamp_frequency << '\n';
         }
-        std::cout << "renderer=d3d12 buffers=2 format=RGBA8_UNORM vsync=on debug_layer="
-                  << options.debug_layer << " gpu_validation=" << options.gpu_validation << '\n';
+        std::cout << "renderer=d3d12 buffers=2 format=RGBA8_UNORM vsync="
+                  << (offscreen ? "off" : "on") << " window_created=" << !offscreen
+                  << " postprocess=" << ToString(options.postprocess)
+                  << " debug_layer=" << options.debug_layer
+                  << " gpu_validation=" << options.gpu_validation << '\n';
         CheckDiagnostics();
     }
 
@@ -536,6 +569,143 @@ struct ClearRenderer::Impl
         return true;
     }
 
+    bool ReloadPostProcess(const std::filesystem::path& source, std::string& diagnostics)
+    {
+        if (stopped || faulted)
+        {
+            throw std::logic_error("Renderer is shut down or faulted.");
+        }
+        const auto snapshot = ReadShaderSource(source, diagnostics);
+        if (snapshot.empty())
+        {
+            return false;
+        }
+        const auto vertex = CompileShader(source, snapshot, L"VSMain", L"vs_6_0");
+        const auto pixel = CompileShader(source, snapshot, L"PSMain", L"ps_6_0");
+        diagnostics = vertex.diagnostics + pixel.diagnostics;
+        if (!vertex.IsValid() || !pixel.IsValid())
+        {
+            return false;
+        }
+        faulted = true;
+        WaitIdle();
+        CheckDiagnostics();
+        ComPtr<ID3D12RootSignature> candidate_root;
+        ComPtr<ID3D12PipelineState> candidate_pipeline;
+        D3D12_DESCRIPTOR_RANGE range{};
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        range.NumDescriptors = 1;
+        std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[0].DescriptorTable = {1, &range};
+        parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameters[1].Constants.Num32BitValues = 1;
+        parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC root_desc{};
+        root_desc.NumParameters = static_cast<UINT>(parameters.size());
+        root_desc.pParameters = parameters.data();
+        ComPtr<ID3DBlob> blob, errors;
+        Check(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &errors),
+              "Serialize post root signature");
+        CheckDevice(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                IID_PPV_ARGS(&candidate_root)),
+                    "Create post root signature");
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+        desc.pRootSignature = candidate_root.Get();
+        desc.VS = {vertex.bytecode.data(), vertex.bytecode.size()};
+        desc.PS = {pixel.bytecode.data(), pixel.bytecode.size()};
+        auto& blend = desc.BlendState.RenderTarget[0];
+        blend.SrcBlend = D3D12_BLEND_ONE;
+        blend.DestBlend = D3D12_BLEND_ZERO;
+        blend.BlendOp = D3D12_BLEND_OP_ADD;
+        blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+        blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        desc.SampleMask = UINT_MAX;
+        desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        desc.RasterizerState.DepthClipEnable = TRUE;
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        desc.NumRenderTargets = 1;
+        desc.RTVFormats[0] = kBackBufferFormat;
+        desc.SampleDesc.Count = 1;
+        const HRESULT result =
+            device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&candidate_pipeline));
+        if (FAILED(result))
+        {
+            bool confirmed = false;
+            if (info_queue && SUCCEEDED(device->GetDeviceRemovedReason()))
+            {
+                const auto count = info_queue->GetNumStoredMessagesAllowedByRetrievalFilter();
+                for (UINT64 index = 0; index < count; ++index)
+                {
+                    SIZE_T length = 0;
+                    Check(info_queue->GetMessage(index, nullptr, &length), "Post candidate size");
+                    std::vector<unsigned char> storage(length);
+                    auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+                    Check(info_queue->GetMessage(index, message, &length),
+                          "Post candidate message");
+                    const bool contract =
+                        message->ID ==
+                            D3D12_MESSAGE_ID_CREATEGRAPHICSPIPELINESTATE_PS_ROOT_SIGNATURE_MISMATCH ||
+                        message->ID ==
+                            D3D12_MESSAGE_ID_CREATEGRAPHICSPIPELINESTATE_VS_ROOT_SIGNATURE_MISMATCH ||
+                        (message->ID >=
+                             D3D12_MESSAGE_ID_CREATEGRAPHICSPIPELINESTATE_SHADER_LINKAGE_REGISTERINDEX &&
+                         message->ID <=
+                             D3D12_MESSAGE_ID_CREATEGRAPHICSPIPELINESTATE_SHADER_LINKAGE_SEMANTICNAME_NOT_FOUND);
+                    if (!contract && message->Severity <= D3D12_MESSAGE_SEVERITY_WARNING)
+                    {
+                        CheckDiagnostics();
+                        CheckDevice(result, "Create post PSO");
+                    }
+                    confirmed = confirmed || contract;
+                    diagnostics += "\nrejected_post_candidate id=" + std::to_string(message->ID) +
+                                   " " + message->pDescription;
+                }
+                info_queue->ClearStoredMessages();
+            }
+            if (!confirmed)
+            {
+                CheckDevice(result, "Create post PSO");
+            }
+            faulted = false;
+            return false;
+        }
+        CheckDiagnostics();
+        post_root = std::move(candidate_root);
+        post_pipeline = std::move(candidate_pipeline);
+        ++post_generation;
+        faulted = false;
+        return true;
+    }
+    void SetPostProcess(PostProcess mode)
+    {
+        if (stopped || faulted)
+        {
+            throw std::logic_error("Renderer is shut down or faulted.");
+        }
+        if (!IsValid(mode) || (mode != PostProcess::None && !post_pipeline))
+        {
+            throw std::invalid_argument("Post mode requires a valid post pipeline.");
+        }
+        if (mode == options.postprocess)
+        {
+            return;
+        }
+        faulted = true;
+        WaitIdle();
+        options.postprocess = mode;
+        CreateSceneTargets();
+        CheckDiagnostics();
+        faulted = false;
+    }
+
     void CreateTriangleGeometry()
     {
         const auto create_buffer = [&](UINT64 bytes, D3D12_HEAP_TYPE heap_type,
@@ -614,18 +784,79 @@ struct ClearRenderer::Impl
         geometry_info.resources_ready = true;
     }
 
-    void CreateBuffers()
+    void CreateColorTarget(ComPtr<ID3D12Resource>& target, D3D12_RESOURCE_STATES state,
+                           const wchar_t* name)
+    {
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = size.width;
+        desc.Height = size.height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = kBackBufferFormat;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_CLEAR_VALUE clear{};
+        clear.Format = kBackBufferFormat;
+        std::copy(optimized_clear.begin(), optimized_clear.end(), clear.Color);
+        CheckDevice(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
+                                                    &clear, IID_PPV_ARGS(&target)),
+                    "Create color target");
+        Check(target->SetName(name), "Color target name");
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE Rtv(UINT index) const
     {
         auto handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += static_cast<SIZE_T>(index) * rtv_stride;
+        return handle;
+    }
+    void CreateSceneTargets()
+    {
+        if (options.postprocess == PostProcess::None)
+        {
+            return;
+        }
+        auto srv = srv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT index = 0; index < kBufferCount; ++index)
         {
-            CheckDevice(swapchain->GetBuffer(index, IID_PPV_ARGS(&frames[index].buffer)),
-                        "GetBuffer");
-            const auto name = L"TinyMe.BackBuffer." + std::to_wstring(index);
-            Check(frames[index].buffer->SetName(name.c_str()), "Back buffer name");
-            device->CreateRenderTargetView(frames[index].buffer.Get(), nullptr, handle);
-            handle.ptr += rtv_stride;
+            auto& frame = frames[index];
+            if (!frame.scene)
+            {
+                CreateColorTarget(frame.scene, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                  L"TinyMe.SceneColor");
+                device->CreateRenderTargetView(frame.scene.Get(), nullptr,
+                                               Rtv(kBufferCount + index));
+                D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+                desc.Format = kBackBufferFormat;
+                desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                desc.Texture2D.MipLevels = 1;
+                device->CreateShaderResourceView(frame.scene.Get(), &desc, srv);
+            }
+            srv.ptr += srv_stride;
         }
+    }
+    void CreateBuffers()
+    {
+        for (UINT index = 0; index < kBufferCount; ++index)
+        {
+            if (offscreen)
+            {
+                CreateColorTarget(frames[index].buffer, D3D12_RESOURCE_STATE_COMMON,
+                                  L"TinyMe.OffscreenOutput");
+            }
+            else
+            {
+                CheckDevice(swapchain->GetBuffer(index, IID_PPV_ARGS(&frames[index].buffer)),
+                            "GetBuffer");
+            }
+            const auto name = L"TinyMe.Output." + std::to_wstring(index);
+            Check(frames[index].buffer->SetName(name.c_str()), "Output target name");
+            device->CreateRenderTargetView(frames[index].buffer.Get(), nullptr, Rtv(index));
+        }
+        CreateSceneTargets();
     }
 
     void WaitForFence(UINT64 value)
@@ -691,11 +922,11 @@ struct ClearRenderer::Impl
         {
             throw std::logic_error("Renderer is shut down or faulted; only Shutdown is allowed.");
         }
-        if (new_size.width == 0 || new_size.height == 0 || new_size.width > 16384 ||
-            new_size.height > 16384)
+        if (new_size.width == 0 || new_size.height == 0 || new_size.width > kMaxRenderDimension ||
+            new_size.height > kMaxRenderDimension)
         {
             throw std::invalid_argument(
-                "Renderer size must be in [1, 16384]; skip minimized windows.");
+                "Renderer size must be in [1, 2048]; skip minimized windows.");
         }
         if (new_size.width == size.width && new_size.height == size.height)
         {
@@ -706,18 +937,31 @@ struct ClearRenderer::Impl
         for (auto& frame : frames)
         {
             frame.buffer.Reset();
+            frame.scene.Reset();
             frame.last_fence = 0;
         }
-        CheckDevice(swapchain->ResizeBuffers(kBufferCount, new_size.width, new_size.height,
-                                             kBackBufferFormat, 0),
-                    "ResizeBuffers");
+        if (!offscreen)
+        {
+            CheckDevice(swapchain->ResizeBuffers(kBufferCount, new_size.width, new_size.height,
+                                                 kBackBufferFormat, 0),
+                        "ResizeBuffers");
+        }
+        size = new_size;
+        output_valid = false;
         CreateBuffers();
         CheckDiagnostics();
-        size = new_size;
         occluded = false;
         faulted = false;
     }
 
+    void Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+                    D3D12_RESOURCE_STATES after)
+    {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition = {resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
+        commands->ResourceBarrier(1, &barrier);
+    }
     bool Render(const std::array<float, 4>& clear_color, const TriangleParameters& parameters,
                 const CameraParameters& camera)
     {
@@ -740,6 +984,10 @@ struct ClearRenderer::Impl
         {
             throw std::invalid_argument("Invalid camera parameters.");
         }
+        if (options.postprocess != PostProcess::None && !post_pipeline)
+        {
+            throw std::logic_error("Post pipeline must be initialized before rendering.");
+        }
         CameraTransform transform;
         if (triangle_pipeline)
         {
@@ -747,6 +995,30 @@ struct ClearRenderer::Impl
                                                          static_cast<float>(size.height));
         }
         faulted = true;
+        if ((offscreen || options.postprocess != PostProcess::None) &&
+            clear_color != optimized_clear)
+        {
+            WaitIdle();
+            optimized_clear = clear_color;
+            for (auto& context : frames)
+            {
+                context.scene.Reset();
+                if (offscreen)
+                {
+                    context.buffer.Reset();
+                }
+            }
+            if (offscreen)
+            {
+                CreateBuffers();
+            }
+            else
+            {
+                CreateSceneTargets();
+            }
+            output_valid = false;
+            CheckDiagnostics();
+        }
         if (occluded)
         {
             const auto visibility = swapchain->Present(0, DXGI_PRESENT_TEST);
@@ -758,7 +1030,8 @@ struct ClearRenderer::Impl
             CheckDevice(visibility, "Present visibility test");
             occluded = false;
         }
-        const auto index = swapchain->GetCurrentBackBufferIndex();
+        const auto index = offscreen ? static_cast<UINT>(submitted_frames % kBufferCount)
+                                     : swapchain->GetCurrentBackBufferIndex();
         auto& frame = frames[index];
         WaitForFence(frame.last_fence);
         if (timer)
@@ -768,15 +1041,18 @@ struct ClearRenderer::Impl
         const auto record_start = std::chrono::steady_clock::now();
         CheckDevice(frame.allocator->Reset(), "Allocator Reset");
         CheckDevice(commands->Reset(frame.allocator.Get(), nullptr), "Command list Reset");
-        D3D12_RESOURCE_BARRIER barrier{};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = frame.buffer.Get();
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        commands->ResourceBarrier(1, &barrier);
-        auto handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        handle.ptr += static_cast<SIZE_T>(index) * rtv_stride;
+        const bool has_post = options.postprocess != PostProcess::None;
+        if (has_post)
+        {
+            Transition(frame.scene.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                       D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
+        else
+        {
+            Transition(frame.buffer.Get(), D3D12_RESOURCE_STATE_COMMON,
+                       D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
+        auto handle = Rtv(has_post ? kBufferCount + index : index);
         if (timer)
         {
             timer->Begin(index, commands.Get());
@@ -806,35 +1082,143 @@ struct ClearRenderer::Impl
         {
             timer->End(index, commands.Get());
         }
-        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-        commands->ResourceBarrier(1, &barrier);
+        if (has_post)
+        {
+            Transition(frame.scene.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            Transition(frame.buffer.Get(), D3D12_RESOURCE_STATE_COMMON,
+                       D3D12_RESOURCE_STATE_RENDER_TARGET);
+            const auto output = Rtv(index);
+            const D3D12_VIEWPORT viewport{
+                0, 0, static_cast<float>(size.width), static_cast<float>(size.height), 0, 1};
+            const D3D12_RECT scissor{0, 0, static_cast<LONG>(size.width),
+                                     static_cast<LONG>(size.height)};
+            commands->RSSetViewports(1, &viewport);
+            commands->RSSetScissorRects(1, &scissor);
+            commands->OMSetRenderTargets(1, &output, FALSE, nullptr);
+            ID3D12DescriptorHeap* heaps[]{srv_heap.Get()};
+            commands->SetDescriptorHeaps(1, heaps);
+            commands->SetGraphicsRootSignature(post_root.Get());
+            auto srv = srv_heap->GetGPUDescriptorHandleForHeapStart();
+            srv.ptr += static_cast<UINT64>(index) * srv_stride;
+            commands->SetGraphicsRootDescriptorTable(0, srv);
+            commands->SetGraphicsRoot32BitConstant(1, static_cast<UINT>(options.postprocess), 0);
+            commands->SetPipelineState(post_pipeline.Get());
+            commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            if (timer)
+            {
+                timer->BeginPost(index, commands.Get());
+            }
+            commands->DrawInstanced(3, 1, 0, 0);
+            if (timer)
+            {
+                timer->EndPost(index, commands.Get());
+            }
+        }
+        Transition(frame.buffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                   D3D12_RESOURCE_STATE_COMMON);
         CheckDevice(commands->Close(), "Command list Close");
         const auto cpu_record_ms = std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - record_start)
                                        .count();
         ID3D12CommandList* submitted[]{commands.Get()};
         queue->ExecuteCommandLists(1, submitted);
-        const auto present_result = swapchain->Present(1, 0);
+        const auto present_result = offscreen ? S_OK : swapchain->Present(1, 0);
         frame.last_fence = Signal();
+        ++submitted_frames;
+        last_frame_index = index;
+        output_valid = true;
         if (triangle_pipeline)
         {
             geometry_info.last_use_fence = frame.last_fence;
         }
         CheckDevice(present_result, "Present");
         occluded = present_result == DXGI_STATUS_OCCLUDED;
-        if (!occluded)
+        if (!offscreen && !occluded)
         {
             ++presentations;
         }
         if (timer)
         {
-            timer->Submitted(
-                index, frame.last_fence,
-                {occluded ? 0 : presentations, pipeline_generation, size, cpu_record_ms, 0.0});
+            timer->Submitted(index, frame.last_fence,
+                             {offscreen || occluded ? 0 : presentations, pipeline_generation, size,
+                              cpu_record_ms, 0.0, submitted_frames, post_generation, 0.0,
+                              options.postprocess});
         }
         CheckDiagnostics();
         faulted = false;
         return !occluded;
+    }
+
+    std::vector<std::uint8_t> CaptureRgba()
+    {
+        if (stopped || faulted || !offscreen || !output_valid)
+        {
+            throw std::logic_error(
+                "Capture requires a live offscreen renderer with a completed output.");
+        }
+        faulted = true;
+        auto& frame = frames[last_frame_index];
+        WaitForFence(frame.last_fence);
+        if (timer)
+        {
+            timer->Poll(fence->GetCompletedValue());
+        }
+        const auto desc = frame.buffer->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT64 total_bytes = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &total_bytes);
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = total_bytes;
+        buffer.Height = 1;
+        buffer.DepthOrArraySize = 1;
+        buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        CheckDevice(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                    IID_PPV_ARGS(&capture_readback)),
+                    "Create capture readback");
+        CheckDevice(frame.allocator->Reset(), "Capture allocator Reset");
+        CheckDevice(commands->Reset(frame.allocator.Get(), nullptr), "Capture list Reset");
+        Transition(frame.buffer.Get(), D3D12_RESOURCE_STATE_COMMON,
+                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = frame.buffer.Get();
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = capture_readback.Get();
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        destination.PlacedFootprint = footprint;
+        commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        Transition(frame.buffer.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                   D3D12_RESOURCE_STATE_COMMON);
+        CheckDevice(commands->Close(), "Capture list Close");
+        ID3D12CommandList* submitted[]{commands.Get()};
+        queue->ExecuteCommandLists(1, submitted);
+        frame.last_fence = Signal();
+        WaitForFence(frame.last_fence);
+        CheckDiagnostics();
+        const SIZE_T row_bytes = static_cast<SIZE_T>(size.width) * 4;
+        std::vector<std::uint8_t> pixels(row_bytes * size.height);
+        void* mapped = nullptr;
+        const D3D12_RANGE read{static_cast<SIZE_T>(footprint.Offset),
+                               static_cast<SIZE_T>(total_bytes)};
+        CheckDevice(capture_readback->Map(0, &read, &mapped), "Capture Map");
+        for (UINT row = 0; row < size.height; ++row)
+        {
+            const auto* input = static_cast<const std::uint8_t*>(mapped) + footprint.Offset +
+                                static_cast<SIZE_T>(row) * footprint.Footprint.RowPitch;
+            std::memcpy(pixels.data() + static_cast<SIZE_T>(row) * row_bytes, input, row_bytes);
+        }
+        const D3D12_RANGE no_writes{0, 0};
+        capture_readback->Unmap(0, &no_writes);
+        capture_readback.Reset();
+        faulted = false;
+        return pixels;
     }
 
     void Shutdown()
@@ -880,6 +1264,10 @@ struct ClearRenderer::Impl
         commands.Reset();
         triangle_pipeline.Reset();
         root_signature.Reset();
+        post_pipeline.Reset();
+        post_root.Reset();
+        capture_readback.Reset();
+        srv_heap.Reset();
         triangle_upload.Reset();
         triangle_indices.Reset();
         triangle_vertices.Reset();
@@ -888,6 +1276,7 @@ struct ClearRenderer::Impl
         for (auto& frame : frames)
         {
             frame.buffer.Reset();
+            frame.scene.Reset();
             frame.allocator.Reset();
         }
         swapchain.Reset();
@@ -953,6 +1342,12 @@ ClearRenderer::ClearRenderer(HWND hwnd, WindowSize size, RendererOptions options
     impl_->Initialize(hwnd, size, options);
 }
 
+ClearRenderer::ClearRenderer(WindowSize size, RendererOptions options)
+    : impl_(std::make_unique<Impl>())
+{
+    impl_->Initialize(nullptr, size, options, true);
+}
+
 ClearRenderer::~ClearRenderer() = default;
 
 void ClearRenderer::Resize(WindowSize size)
@@ -1015,6 +1410,23 @@ bool ClearRenderer::ReloadTriangle(const std::filesystem::path& source, std::str
 std::uint64_t ClearRenderer::GetPipelineGeneration() const noexcept
 {
     return impl_->pipeline_generation;
+}
+
+bool ClearRenderer::ReloadPostProcess(const std::filesystem::path& source, std::string& diagnostics)
+{
+    return impl_->ReloadPostProcess(source, diagnostics);
+}
+std::uint64_t ClearRenderer::GetPostGeneration() const noexcept
+{
+    return impl_->post_generation;
+}
+void ClearRenderer::SetPostProcess(PostProcess mode)
+{
+    impl_->SetPostProcess(mode);
+}
+std::vector<std::uint8_t> ClearRenderer::CaptureRgba()
+{
+    return impl_->CaptureRgba();
 }
 
 WindowSize ClearRenderer::GetSize() const noexcept

@@ -138,4 +138,4 @@ powershell -NoProfile -File tools/dev.ps1 verify -Configuration RelWithDebInfo
 
 输出`out/m2-003-profile-{runtime,editor}-RelWithDebInfo.{json,log}`，产物忽略，长期证据是表格/命令/源码与STATE。CPU范围排除相机数学/初始化上传，GPU范围排除初始化上传/barrier/resolve/Present；均非整帧。输入已不同于历史M2-002，时钟/背景负载未控制，禁止据两表微小差异宣布性能优化或应用间优劣。
 
-M2工程验收完成；M3和幼年期整体未完成。下一切片为离屏颜色目标与可替换全屏后处理，仍不预建Scene/Render Graph；渲染到纹理不等于无窗口GPU，独立离屏执行模式后续明确。完整六组合与检查数只在STATE维护。
+以上为M2完成时历史证据。当前整个M3已验收，direct作为保留对照；RTT后处理与真正无窗口GPU复现见 [EXP-0002](../EXP-0002-postprocess/README.md)，两实验构成幼年期M0–M3工程出口。共享同一相机/网格输入，Runtime与Editor offscreen的direct/copy完整PNG一致，仍不预建Scene/Render Graph。现有历史VSYNC实采不与新offscreen无VSYNC数值作性能优劣比较。完整六组合/架构复盘只在STATE与ADR维护。

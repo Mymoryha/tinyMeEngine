@@ -2,6 +2,7 @@
 
 #include <tinyme/core/Camera.h>
 #include <tinyme/core/ExperimentParameters.h>
+#include <tinyme/core/RenderPipeline.h>
 #include <tinyme/platform/windows/Window.h>
 
 #include <array>
@@ -18,6 +19,7 @@ struct RendererOptions
     bool debug_layer = false;
     bool gpu_validation = false;
     bool profiling = false;
+    PostProcess postprocess = PostProcess::None;
 };
 
 struct FrameTiming
@@ -26,7 +28,11 @@ struct FrameTiming
     std::uint64_t pipeline_generation = 0;
     WindowSize size;
     double cpu_record_ms = 0.0;
-    double gpu_pass_ms = 0.0;
+    double gpu_pass_ms = 0.0;       // Scene clear + indexed draw only, preserving M2 scope.
+    std::uint64_t frame_number = 0; // Submitted GPU frame; offscreen never presents.
+    std::uint64_t post_generation = 0;
+    double gpu_post_ms = 0.0;
+    PostProcess postprocess = PostProcess::None;
 };
 
 struct RendererInfo
@@ -58,6 +64,8 @@ class ClearRenderer
 {
   public:
     ClearRenderer(HWND hwnd, WindowSize size, RendererOptions options);
+    // GPU-only target: creates no window or swapchain.
+    ClearRenderer(WindowSize size, RendererOptions options);
     ~ClearRenderer();
     ClearRenderer(const ClearRenderer&) = delete;
     ClearRenderer& operator=(const ClearRenderer&) = delete;
@@ -78,6 +86,12 @@ class ClearRenderer
     [[nodiscard]] bool ReloadTriangle(const std::filesystem::path& source,
                                       std::string& diagnostics);
     [[nodiscard]] std::uint64_t GetPipelineGeneration() const noexcept;
+    [[nodiscard]] bool ReloadPostProcess(const std::filesystem::path& source,
+                                         std::string& diagnostics);
+    [[nodiscard]] std::uint64_t GetPostGeneration() const noexcept;
+    void SetPostProcess(PostProcess mode);
+    // Explicit batch capture boundary; waits for last output and strips GPU row padding.
+    [[nodiscard]] std::vector<std::uint8_t> CaptureRgba();
     // Waits for GPU use, releases children and checks debug-layer live child objects.
     void Shutdown();
     [[nodiscard]] WindowSize GetSize() const noexcept;

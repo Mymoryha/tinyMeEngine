@@ -82,18 +82,22 @@ try {
             $preset = if ($Configuration -eq 'Debug') { 'windows-debug' } else { 'windows-profile' }
             Invoke-Native $cmake @('--build', '--preset', $preset, '--parallel')
             if ($Action -in @('test', 'verify', 'gpu-test')) {
-                Invoke-Native $ctest @('--preset', $preset)
+                Invoke-Native $ctest @('--preset', $preset, '-LE', 'GPU')
             }
             if ($Action -eq 'gpu-test') {
                 Write-Host 'GPU validation opens desktop windows; RTX 5080 and Graphics Tools are required.'
                 $gpuTests = Join-Path $root "out\build\windows-vs2022\bin\$Configuration\tinyme_gpu_tests.exe"
                 Invoke-Native -Executable $gpuTests -Arguments @()
                 Invoke-Native -Executable $gpuTests -Arguments @('--gpu-validation')
+                $postTests = Join-Path $root "out\build\windows-vs2022\bin\$Configuration\tinyme_post_gpu_tests.exe"
+                Invoke-Native -Executable $postTests -Arguments @()
+                Invoke-Native -Executable $postTests -Arguments @('--gpu-validation')
                 foreach ($app in @('tinyme_runtime', 'tinyme_editor')) {
                     $program = Join-Path $root "out\build\windows-vs2022\bin\$Configuration\$app.exe"
                     if (Test-Path $program) {
                         Invoke-Native $cmake @("-DPROGRAM=$program", '-P', (Join-Path $root 'tests\CheckWindowCli.cmake'))
                         Invoke-Native $cmake @("-DPROGRAM=$program", '-P', (Join-Path $root 'tests\CheckProfileCli.cmake'))
+                        Invoke-Native $cmake @("-DPROGRAM=$program", '-P', (Join-Path $root 'tests\CheckM3Cli.cmake'))
                     }
                 }
             }

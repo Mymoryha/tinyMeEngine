@@ -19,6 +19,8 @@ class GpuTimer
     GpuTimer& operator=(const GpuTimer&) = delete;
     void Begin(UINT slot, ID3D12GraphicsCommandList* commands);
     void End(UINT slot, ID3D12GraphicsCommandList* commands);
+    void BeginPost(UINT slot, ID3D12GraphicsCommandList* commands);
+    void EndPost(UINT slot, ID3D12GraphicsCommandList* commands);
     void Submitted(UINT slot, UINT64 fence_value, FrameTiming timing);
     void Poll(UINT64 completed_fence);
     [[nodiscard]] std::vector<FrameTiming> TakeCompleted();

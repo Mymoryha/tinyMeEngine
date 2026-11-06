@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.31.10)
-project(TinyMeEngine VERSION 0.5.0 LANGUAGES CXX)
+project(TinyMeEngine VERSION 0.6.0 LANGUAGES CXX)
 include(cmake/Dxc.cmake)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -65,9 +65,10 @@ target_include_directories(tinyme_d3d12 PUBLIC engine/render/d3d12/include
 target_link_libraries(tinyme_d3d12 PUBLIC tinyme_windows TinyMe::Core PRIVATE d3d12 dxgi dxguid)
 tinyme_configure_target(tinyme_d3d12)
 
-add_library(tinyme_windowed_runtime STATIC engine/runtime/src/WindowedSession.cpp engine/runtime/src/ProfileReport.cpp)
+add_library(tinyme_windowed_runtime STATIC engine/runtime/src/WindowedSession.cpp engine/runtime/src/ProfileReport.cpp
+    engine/runtime/src/OffscreenSession.cpp engine/runtime/src/ImageCapture.cpp)
 target_include_directories(tinyme_windowed_runtime PUBLIC engine/runtime/include)
-target_link_libraries(tinyme_windowed_runtime PUBLIC TinyMe::Core PRIVATE tinyme_d3d12 TinyMe::Runtime)
+target_link_libraries(tinyme_windowed_runtime PUBLIC TinyMe::Core PRIVATE tinyme_d3d12 TinyMe::Runtime windowscodecs ole32)
 tinyme_configure_target(tinyme_windowed_runtime)
 
 add_library(tinyme_app_host STATIC apps/common/Application.cpp)
@@ -89,7 +90,9 @@ endif()
 add_custom_target(tinyme_shader_asset ALL
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/shaders"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PROJECT_SOURCE_DIR}/shaders/Triangle.hlsl"
-        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/shaders/Triangle.hlsl" VERBATIM)
+        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/shaders/Triangle.hlsl"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PROJECT_SOURCE_DIR}/shaders/PostProcess.hlsl"
+        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/shaders/PostProcess.hlsl" VERBATIM)
 function(tinyme_deploy_shader target)
     tinyme_deploy_dxc(${target})
     add_dependencies(${target} tinyme_shader_asset)
@@ -113,6 +116,12 @@ if(BUILD_TESTING)
     add_test(NAME camera.contracts COMMAND tinyme_camera_tests)
     set_tests_properties(camera.contracts PROPERTIES TIMEOUT 15)
 
+    add_executable(tinyme_pipeline_tests tests/PipelineTests.cpp)
+    target_link_libraries(tinyme_pipeline_tests PRIVATE TinyMe::Core)
+    tinyme_configure_target(tinyme_pipeline_tests)
+    add_test(NAME pipeline.contracts COMMAND tinyme_pipeline_tests)
+    set_tests_properties(pipeline.contracts PROPERTIES TIMEOUT 15)
+
     add_executable(tinyme_shader_tests tests/ShaderTests.cpp)
     target_include_directories(tinyme_shader_tests PRIVATE engine/render/d3d12/src)
     target_link_libraries(tinyme_shader_tests PRIVATE tinyme_d3d12)
@@ -128,6 +137,18 @@ if(BUILD_TESTING)
     add_test(NAME profile.contracts COMMAND tinyme_profile_tests)
     set_tests_properties(profile.contracts PROPERTIES TIMEOUT 15)
 
+    add_executable(tinyme_image_tests tests/ImageCaptureTests.cpp)
+    target_include_directories(tinyme_image_tests PRIVATE engine/runtime/src)
+    target_link_libraries(tinyme_image_tests PRIVATE tinyme_windowed_runtime tinyme_d3d12 windowscodecs ole32)
+    tinyme_configure_target(tinyme_image_tests)
+    add_test(NAME image.contracts COMMAND tinyme_image_tests)
+    set_tests_properties(image.contracts PROPERTIES TIMEOUT 30)
+
+    add_executable(tinyme_post_gpu_tests tests/PostProcessGpuTests.cpp)
+    target_link_libraries(tinyme_post_gpu_tests PRIVATE tinyme_d3d12 tinyme_windowed_runtime gdi32 dwmapi)
+    tinyme_configure_target(tinyme_post_gpu_tests)
+    tinyme_deploy_shader(tinyme_post_gpu_tests)
+
     add_executable(tinyme_gpu_tests tests/GpuTests.cpp)
     target_link_libraries(tinyme_gpu_tests PRIVATE tinyme_d3d12 tinyme_windowed_runtime gdi32 dwmapi)
     tinyme_configure_target(tinyme_gpu_tests)
@@ -137,6 +158,10 @@ if(BUILD_TESTING)
         add_test(NAME gpu.lifecycle COMMAND tinyme_gpu_tests)
         add_test(NAME gpu.lifecycle.gbv COMMAND tinyme_gpu_tests --gpu-validation)
         set_tests_properties(gpu.lifecycle gpu.lifecycle.gbv PROPERTIES
+            LABELS "GPU" RUN_SERIAL TRUE TIMEOUT 120)
+        add_test(NAME gpu.postprocess COMMAND tinyme_post_gpu_tests)
+        add_test(NAME gpu.postprocess.gbv COMMAND tinyme_post_gpu_tests --gpu-validation)
+        set_tests_properties(gpu.postprocess gpu.postprocess.gbv PROPERTIES
             LABELS "GPU" RUN_SERIAL TRUE TIMEOUT 120)
     endif()
 
@@ -155,7 +180,9 @@ if(BUILD_TESTING)
                 duplicate_scale clear_parameters samples_without_profile zero_samples
                 excessive_warmup insufficient_profile_frames duplicate_profile missing_report
                 duplicate_report headless_camera clear_camera invalid_fov missing_camera
-                duplicate_camera degenerate_camera)
+                duplicate_camera degenerate_camera conflicting_offscreen headless_post bad_post
+                post_without_mode post_shader_none bad_width zero_height duplicate_size
+                windowed_capture bad_capture_type capture_report_conflict offscreen_clear_camera)
             set(test_name "${app}.${case}")
             add_test(NAME "${test_name}" COMMAND "${CMAKE_COMMAND}"
                 "-DPROGRAM=$<TARGET_FILE:${app}>"
@@ -174,6 +201,10 @@ if(BUILD_TESTING)
                 "-DPROGRAM=$<TARGET_FILE:${app}>"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/CheckProfileCli.cmake")
             set_tests_properties("${app}.profile" PROPERTIES LABELS "GPU" RUN_SERIAL TRUE TIMEOUT 90)
+            add_test(NAME "${app}.m3" COMMAND "${CMAKE_COMMAND}"
+                "-DPROGRAM=$<TARGET_FILE:${app}>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/CheckM3Cli.cmake")
+            set_tests_properties("${app}.m3" PROPERTIES LABELS "GPU" RUN_SERIAL TRUE TIMEOUT 120)
         endif()
     endforeach()
 endif()

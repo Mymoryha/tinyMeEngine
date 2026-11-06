@@ -2,6 +2,7 @@
 
 #include <tinyme/core/Camera.h>
 #include <tinyme/core/ExperimentParameters.h>
+#include <tinyme/core/RenderPipeline.h>
 
 #include <cstdint>
 #include <span>
@@ -20,7 +21,8 @@ enum class LaunchAction
 enum class ExecutionMode
 {
     HeadlessLogic,
-    WindowedGpu
+    WindowedGpu,
+    OffscreenGpu
 };
 
 inline constexpr std::uint32_t kMaxHeadlessFrames = 1'000'000;
@@ -39,6 +41,11 @@ struct LaunchOptions
     CameraParameters camera;
     ProfileOptions profile;
     std::string report_path;
+    PostProcess postprocess = PostProcess::None;
+    std::string post_shader_path;
+    std::string capture_path;
+    std::uint32_t width = 1280;
+    std::uint32_t height = 720;
 };
 
 struct ParseResult

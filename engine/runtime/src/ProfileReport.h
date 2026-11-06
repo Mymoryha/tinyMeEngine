@@ -16,13 +16,19 @@ struct ProfileStatus
     bool closed_by_user = false;
     std::uint64_t dropped = 0;
     std::uint64_t validation_warnings = 0;
+    bool capture_saved = false;
+    std::uint64_t validation_errors = 0;
 };
+
+// Shared GPU entry validation; these operations do not initialize a window or device.
+void ResolveSessionShaderPaths(WindowedRunOptions& options);
+void ValidateGpuSessionOptions(const WindowedRunOptions& options);
 
 [[nodiscard]] std::string
 BuildProfileReport(const WindowedRunOptions& options, const RendererInfo& info,
                    WindowSize initial_size, std::wstring_view application, std::uint64_t generation,
                    bool debug_layer, ProfileStatus status, std::span<const FrameTiming> samples,
-                   TriangleGeometryInfo geometry = {});
+                   TriangleGeometryInfo geometry = {}, std::uint64_t post_generation = 0);
 // CREATE_NEW: never overwrites an existing user report. Parent directory must exist.
 void SaveProfileReport(const std::filesystem::path& path, std::string_view json);
 

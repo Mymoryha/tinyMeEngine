@@ -16,39 +16,20 @@ namespace tinyme
 {
 WindowedRunResult RunWindowedSession(std::wstring_view title, WindowedRunOptions options)
 {
-    if (!IsValid(options.parameters) || !IsValid(options.profile) || !IsValid(options.camera))
+    if (options.offscreen)
     {
-        throw std::invalid_argument("Invalid session parameters/camera/profile budget.");
+        throw std::invalid_argument("Windowed entry does not accept offscreen configuration.");
     }
-    if (options.profile.enabled && options.frame_limit != 0 &&
-        options.frame_limit < options.profile.warmup_frames + options.profile.sample_frames)
-    {
-        throw std::invalid_argument("Frame budget cannot cover profile samples.");
-    }
-    if (!options.report_path.empty() &&
-        (!options.profile.enabled || std::filesystem::exists(options.report_path)))
-    {
-        throw std::invalid_argument("Report requires profiling and a new output path.");
-    }
-    Window window(title);
+    ResolveSessionShaderPaths(options);
+    ValidateGpuSessionOptions(options);
+    Window window(title, {options.width, options.height});
     RendererOptions renderer_options{options.debug_layer, options.gpu_validation,
-                                     options.profile.enabled};
+                                     options.profile.enabled, options.postprocess};
 #ifdef _DEBUG
     renderer_options.debug_layer = true;
 #endif
     ClearRenderer renderer(window.GetHandle(), window.GetClientSize(), renderer_options);
-    auto shader = options.shader_path;
-    if (options.triangle && shader.empty())
-    {
-        std::vector<wchar_t> executable(32768);
-        const auto length =
-            GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
-        if (length == 0 || length >= executable.size())
-        {
-            throw std::runtime_error("Cannot locate default shader next to executable.");
-        }
-        shader = std::filesystem::path(executable.data()).parent_path() / L"shaders/Triangle.hlsl";
-    }
+    const auto& shader = options.shader_path;
     auto reload = [&]()
     {
         std::string diagnostics;
@@ -68,12 +49,33 @@ WindowedRunResult RunWindowedSession(std::wstring_view title, WindowedRunOptions
     {
         throw std::runtime_error("Initial triangle shader failed; no valid pipeline exists.");
     }
-    std::cout << "experiment=" << (options.triangle ? "triangle" : "clear") << '\n';
+    auto reload_post = [&]()
+    {
+        std::string diagnostics;
+        const bool success = renderer.ReloadPostProcess(options.post_shader_path, diagnostics);
+        const auto utf8_path = options.post_shader_path.generic_u8string();
+        std::cout << "post_shader_reload success=" << success
+                  << " generation=" << renderer.GetPostGeneration() << " source=\""
+                  << reinterpret_cast<const char*>(utf8_path.c_str()) << "\"\n";
+        if (!diagnostics.empty())
+        {
+            std::cout << "post_shader_diagnostics: " << diagnostics << '\n';
+        }
+        std::cout << std::flush;
+        return success;
+    };
+    if (options.postprocess != PostProcess::None && !reload_post())
+    {
+        throw std::runtime_error("Initial postprocess shader failed; no valid pipeline exists.");
+    }
+    std::cout << "experiment=" << (options.triangle ? "triangle" : "clear")
+              << " postprocess=" << ToString(options.postprocess) << '\n';
     Session session;
     WindowedRunResult result;
     const auto initial_size = window.GetClientSize();
     const auto initial_surface_revision = window.GetSurfaceRevision();
     const auto initial_generation = renderer.GetPipelineGeneration();
+    const auto initial_post_generation = renderer.GetPostGeneration();
     bool environment_changed = false;
     std::vector<FrameTiming> samples;
     if (options.profile.enabled)
@@ -94,6 +96,8 @@ WindowedRunResult RunWindowedSession(std::wstring_view title, WindowedRunOptions
                 continue;
             }
             if (timing.pipeline_generation != initial_generation ||
+                timing.post_generation != initial_post_generation ||
+                timing.postprocess != options.postprocess ||
                 timing.size.width != initial_size.width ||
                 timing.size.height != initial_size.height)
             {
@@ -136,10 +140,17 @@ WindowedRunResult RunWindowedSession(std::wstring_view title, WindowedRunOptions
             result.closed_by_user = true;
             break;
         }
-        if (window.ConsumeShaderReloadRequest() && options.triangle)
+        if (window.ConsumeShaderReloadRequest())
         {
             environment_changed = true;
-            static_cast<void>(reload());
+            if (options.triangle)
+            {
+                static_cast<void>(reload());
+            }
+            if (options.postprocess != PostProcess::None)
+            {
+                static_cast<void>(reload_post());
+            }
         }
         const auto size = window.GetClientSize();
         if (size.width != initial_size.width || size.height != initial_size.height)
@@ -159,6 +170,7 @@ WindowedRunResult RunWindowedSession(std::wstring_view title, WindowedRunOptions
             window.WaitForMessages(100);
             continue;
         }
+        ++result.rendered_frames;
         if (!session.Tick(1.0 / 60.0))
         {
             throw std::runtime_error("Windowed session rejected the fixed logical timestep.");
@@ -166,23 +178,32 @@ WindowedRunResult RunWindowedSession(std::wstring_view title, WindowedRunOptions
         ++result.presented_frames;
     }
     renderer.Shutdown();
-    result.validation_warnings = renderer.GetValidationStats().warnings;
+    const auto validation = renderer.GetValidationStats();
+    result.validation_warnings = validation.warnings;
+    environment_changed = environment_changed || validation.errors != 0;
     collect();
     if (options.profile.enabled)
     {
         std::sort(samples.begin(), samples.end(),
                   [](const auto& a, const auto& b) { return a.presentation < b.presentation; });
         const auto dropped = renderer.GetDroppedTimingSamples();
-        result.profile_complete = samples.size() == options.profile.sample_frames &&
-                                  !environment_changed && !result.closed_by_user && dropped == 0 &&
+        bool sequence_complete = samples.size() == options.profile.sample_frames;
+        for (std::size_t index = 0; index < samples.size(); ++index)
+        {
+            if (samples[index].presentation != options.profile.warmup_frames + index + 1)
+            {
+                sequence_complete = false;
+            }
+        }
+        result.profile_complete = sequence_complete && !environment_changed &&
+                                  !result.closed_by_user && dropped == 0 &&
                                   result.validation_warnings == 0;
-        options.shader_path = shader;
-        result.profile_json =
-            BuildProfileReport(options, renderer.GetInfo(), initial_size, title, initial_generation,
-                               renderer.IsDebugLayerEnabled(),
-                               {result.profile_complete, environment_changed, result.closed_by_user,
-                                dropped, result.validation_warnings},
-                               samples, renderer.GetTriangleGeometryInfo());
+        result.profile_json = BuildProfileReport(
+            options, renderer.GetInfo(), initial_size, title, initial_generation,
+            renderer.IsDebugLayerEnabled(),
+            {result.profile_complete, environment_changed, result.closed_by_user, dropped,
+             result.validation_warnings, false, validation.errors},
+            samples, renderer.GetTriangleGeometryInfo(), initial_post_generation);
         std::cout << "profile samples=" << samples.size()
                   << " warmup=" << options.profile.warmup_frames
                   << " requested=" << options.profile.sample_frames

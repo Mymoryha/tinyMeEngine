@@ -79,20 +79,144 @@ void Metric(std::ostream& output, const TimingStatistics& stats)
            << ",\"min_ms\":" << stats.min_ms << ",\"max_ms\":" << stats.max_ms << '}';
 }
 } // namespace
+void ResolveSessionShaderPaths(WindowedRunOptions& options)
+{
+    if ((!options.triangle || !options.shader_path.empty()) &&
+        (options.postprocess == PostProcess::None || !options.post_shader_path.empty()))
+    {
+        return;
+    }
+    std::vector<wchar_t> executable(32768);
+    const auto length =
+        GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    if (length == 0 || length >= executable.size())
+    {
+        throw std::runtime_error("Cannot locate default shader next to executable.");
+    }
+    const auto directory = std::filesystem::path(executable.data()).parent_path() / L"shaders";
+    if (options.triangle && options.shader_path.empty())
+    {
+        options.shader_path = directory / L"Triangle.hlsl";
+    }
+    if (options.postprocess != PostProcess::None && options.post_shader_path.empty())
+    {
+        options.post_shader_path = directory / L"PostProcess.hlsl";
+    }
+}
+void ValidateGpuSessionOptions(const WindowedRunOptions& options)
+{
+    if (!IsValid(options.parameters) || !IsValid(options.profile) || !IsValid(options.camera) ||
+        !IsValid(options.postprocess) || options.width == 0 || options.height == 0 ||
+        options.width > kMaxRenderDimension || options.height > kMaxRenderDimension ||
+        options.frame_limit > 1'000'000 || (options.offscreen && options.frame_limit == 0))
+    {
+        throw std::invalid_argument("Invalid GPU session parameters, dimensions or frame budget.");
+    }
+    if (!options.offscreen && !options.capture_path.empty())
+    {
+        throw std::invalid_argument("Capture requires an offscreen GPU session.");
+    }
+    if (options.postprocess == PostProcess::None && !options.post_shader_path.empty())
+    {
+        throw std::invalid_argument("Post shader requires an enabled postprocess.");
+    }
+    if (options.profile.enabled && options.frame_limit != 0 &&
+        options.frame_limit < options.profile.warmup_frames + options.profile.sample_frames)
+    {
+        throw std::invalid_argument("Frame budget cannot cover profile samples.");
+    }
+    if (!options.report_path.empty() && !options.profile.enabled)
+    {
+        throw std::invalid_argument("Report requires profiling.");
+    }
+    const auto validate_output = [](const std::filesystem::path& path)
+    {
+        if (path.empty())
+        {
+            return;
+        }
+        const auto filename = path.filename().native();
+        if (filename.empty() || filename.back() == L'.' || filename.back() == L' ' ||
+            filename.find(L':') != std::wstring::npos)
+        {
+            throw std::invalid_argument("Output filename must not use trailing dot/space or ADS.");
+        }
+        auto parent = path.parent_path();
+        if (parent.empty())
+        {
+            parent = std::filesystem::current_path();
+        }
+        if (!std::filesystem::is_directory(parent) ||
+            std::filesystem::exists(std::filesystem::symlink_status(path)))
+        {
+            throw std::invalid_argument("Output parent must exist; expected a new output path.");
+        }
+    };
+    validate_output(options.report_path);
+    validate_output(options.capture_path);
+    const auto same_path = [](const std::filesystem::path& left, const std::filesystem::path& right)
+    {
+        if (left.empty() || right.empty())
+        {
+            return false;
+        }
+        const auto a = std::filesystem::weakly_canonical(left).native();
+        const auto b = std::filesystem::weakly_canonical(right).native();
+        return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+    };
+    if (same_path(options.report_path, options.capture_path) ||
+        same_path(options.report_path, options.shader_path) ||
+        same_path(options.report_path, options.post_shader_path) ||
+        same_path(options.capture_path, options.shader_path) ||
+        same_path(options.capture_path, options.post_shader_path))
+    {
+        throw std::invalid_argument("GPU session input and output paths conflict.");
+    }
+    if (options.offscreen)
+    {
+        const auto validate_source = [](const std::filesystem::path& path)
+        {
+            if (!std::filesystem::is_regular_file(path))
+            {
+                throw std::invalid_argument("Shader source must be an existing regular file.");
+            }
+            const auto bytes = std::filesystem::file_size(path);
+            if (bytes == 0 || bytes > 4 * 1024 * 1024)
+            {
+                throw std::invalid_argument("Shader source size must be in [1, 4 MiB].");
+            }
+        };
+        if (options.triangle)
+        {
+            validate_source(options.shader_path);
+        }
+        if (options.postprocess != PostProcess::None)
+        {
+            validate_source(options.post_shader_path);
+        }
+    }
+}
 std::string BuildProfileReport(const WindowedRunOptions& options, const RendererInfo& info,
                                WindowSize initial_size, std::wstring_view application,
                                std::uint64_t generation, bool debug_layer, ProfileStatus status,
-                               std::span<const FrameTiming> samples, TriangleGeometryInfo geometry)
+                               std::span<const FrameTiming> samples, TriangleGeometryInfo geometry,
+                               std::uint64_t post_generation)
 {
-    if (!IsValid(options.camera) || initial_size.width == 0 || initial_size.height == 0)
+    if (!IsValid(options.camera) || !IsValid(options.postprocess) || initial_size.width == 0 ||
+        initial_size.height == 0)
     {
-        throw std::invalid_argument("Invalid profile camera or viewport.");
+        throw std::invalid_argument("Invalid profile camera, viewport or postprocess.");
     }
-    std::vector<double> cpu, gpu;
+    const bool has_post = options.postprocess != PostProcess::None;
+    std::vector<double> cpu, gpu, post;
     for (const auto& sample : samples)
     {
         cpu.push_back(sample.cpu_record_ms);
         gpu.push_back(sample.gpu_pass_ms);
+        if (has_post)
+        {
+            post.push_back(sample.gpu_post_ms);
+        }
     }
     std::ostringstream json;
     json.imbue(std::locale::classic());
@@ -108,12 +232,23 @@ std::string BuildProfileReport(const WindowedRunOptions& options, const Renderer
          << ",\n  \"timestamp_frequency_hz\":" << info.timestamp_frequency
          << ",\n  \"debug_layer\":" << debug_layer
          << ",\n  \"gpu_validation\":" << options.gpu_validation
-         << ",\n  \"vsync\":true,\n  \"format\":\"RGBA8_UNORM\",\n  \"experiment\":"
+         << ",\n  \"mode\":" << Quote(options.offscreen ? "offscreen" : "windowed")
+         << ",\n  \"window_created\":" << !options.offscreen
+         << ",\n  \"vsync\":" << !options.offscreen
+         << ",\n  \"format\":\"RGBA8_UNORM\",\n  \"experiment\":"
          << Quote(options.triangle ? "triangle" : "clear") << ",\n  \"shader_source\":"
          << Quote(options.triangle ? Utf8Path(options.shader_path) : "")
          << ",\n  \"shader_profile\":" << (options.triangle ? Quote("vs_6_0/ps_6_0") : "null")
          << ",\n  \"shader_options\":" << (options.triangle ? Quote("HLSL2021 O3 Ges WX") : "null")
          << ",\n  \"compiler\":" << (options.triangle ? Quote("DXC 1.8.2505.32") : "null")
+         << ",\n  \"postprocess\":" << Quote(ToString(options.postprocess))
+         << ",\n  \"post_shader_source\":"
+         << (has_post ? Quote(Utf8Path(options.post_shader_path)) : "null")
+         << ",\n  \"post_shader_profile\":" << (has_post ? Quote("vs_6_0/ps_6_0") : "null")
+         << ",\n  \"post_shader_options\":" << (has_post ? Quote("HLSL2021 O3 Ges WX") : "null")
+         << ",\n  \"post_compiler\":" << (has_post ? Quote("DXC 1.8.2505.32") : "null")
+         << ",\n  \"post_generation\":" << post_generation
+         << ",\n  \"pass_order\":" << (has_post ? "[\"scene\",\"postprocess\"]" : "[\"scene\"]")
          << ",\n  \"parameters_applied\":" << options.triangle
          << ",\n  \"width\":" << initial_size.width << ",\n  \"height\":" << initial_size.height
          << ",\n  \"clear_rgba\":[0.025,0.055,0.09,1],\n  \"scale\":" << options.parameters.scale
@@ -177,6 +312,18 @@ std::string BuildProfileReport(const WindowedRunOptions& options, const Renderer
     {
         json << "null";
     }
+    json << ",\n  \"capture\":";
+    if (!options.capture_path.empty())
+    {
+        json << "{\"path\":" << Quote(Utf8Path(options.capture_path))
+             << ",\"width\":" << initial_size.width << ",\"height\":" << initial_size.height
+             << ",\"format\":\"PNG\",\"pixel_format\":\"RGBA8_UNORM\",\"saved\":"
+             << status.capture_saved << '}';
+    }
+    else
+    {
+        json << "null";
+    }
     json << ",\n  \"pipeline_generation\":" << generation
          << ",\n  \"warmup_frames\":" << options.profile.warmup_frames
          << ",\n  \"requested_samples\":" << options.profile.sample_frames
@@ -184,16 +331,23 @@ std::string BuildProfileReport(const WindowedRunOptions& options, const Renderer
          << ",\n  \"environment_changed\":" << status.environment_changed
          << ",\n  \"closed_by_user\":" << status.closed_by_user
          << ",\n  \"validation_warnings\":" << status.validation_warnings
+         << ",\n  \"validation_errors\":" << status.validation_errors
          << ",\n  \"dropped_samples\":" << status.dropped
-         << ",\n  \"cpu_scope\":\"allocator reset through command-list close; excludes fence wait, "
-            "submit, present, diagnostics, camera math, initialization upload and reload\""
+         << ",\n  \"cpu_scope\":\"allocator reset through command-list close; includes scene and "
+            "optional post command recording; excludes fence wait, submit, present, diagnostics, "
+            "camera math, initialization upload and reload, capture/readback and PNG encoding\""
          << ",\n  \"gpu_scope\":\"clear plus optional indexed triangle; excludes barriers, query "
-            "resolve, "
-            "present, initialization upload and reload\""
+            "resolve, present, initialization upload and reload, postprocess and capture\""
+         << ",\n  \"gpu_post_scope\":"
+         << (has_post ? Quote("fullscreen postprocess draw only; excludes barriers, scene, query "
+                              "resolve, present, reload and capture")
+                      : "null")
          << ",\n  \"p95_method\":\"nearest rank\",\n  \"cpu_record\":";
     Metric(json, SummarizeTimings(cpu));
     json << ",\n  \"gpu_pass\":";
     Metric(json, SummarizeTimings(gpu));
+    json << ",\n  \"gpu_post\":";
+    Metric(json, SummarizeTimings(post));
     json << ",\n  \"samples\":[";
     for (std::size_t index = 0; index < samples.size(); ++index)
     {
@@ -204,7 +358,20 @@ std::string BuildProfileReport(const WindowedRunOptions& options, const Renderer
         const auto& sample = samples[index];
         json << "\n    {\"presentation\":" << sample.presentation
              << ",\"cpu_record_ms\":" << sample.cpu_record_ms
-             << ",\"gpu_pass_ms\":" << sample.gpu_pass_ms << '}';
+             << ",\"gpu_pass_ms\":" << sample.gpu_pass_ms
+             << ",\"frame_number\":" << sample.frame_number
+             << ",\"pipeline_generation\":" << sample.pipeline_generation
+             << ",\"post_generation\":" << sample.post_generation
+             << ",\"postprocess\":" << Quote(ToString(sample.postprocess)) << ",\"gpu_post_ms\":";
+        if (has_post)
+        {
+            json << sample.gpu_post_ms;
+        }
+        else
+        {
+            json << "null";
+        }
+        json << '}';
     }
     json << "\n  ]\n}\n";
     return json.str();

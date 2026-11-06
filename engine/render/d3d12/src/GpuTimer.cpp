@@ -26,13 +26,13 @@ GpuTimer::GpuTimer(ID3D12Device* device, ID3D12CommandQueue* queue)
     }
     D3D12_QUERY_HEAP_DESC query{};
     query.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-    query.Count = 4;
+    query.Count = 8;
     CheckTimer(device->CreateQueryHeap(&query, IID_PPV_ARGS(&queries_)), "Create timestamp heap");
     D3D12_HEAP_PROPERTIES heap{};
     heap.Type = D3D12_HEAP_TYPE_READBACK;
     D3D12_RESOURCE_DESC resource{};
     resource.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    resource.Width = 4 * sizeof(UINT64);
+    resource.Width = 8 * sizeof(UINT64);
     resource.Height = 1;
     resource.DepthOrArraySize = 1;
     resource.MipLevels = 1;
@@ -42,7 +42,7 @@ GpuTimer::GpuTimer(ID3D12Device* device, ID3D12CommandQueue* queue)
                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                IID_PPV_ARGS(&readback_)),
                "Create timestamp readback");
-    const D3D12_RANGE read_range{0, 4 * sizeof(UINT64)};
+    const D3D12_RANGE read_range{0, 8 * sizeof(UINT64)};
     CheckTimer(readback_->Map(0, &read_range, reinterpret_cast<void**>(&mapped_)),
                "Map timestamp readback");
 }
@@ -67,13 +67,23 @@ void GpuTimer::Begin(UINT slot, ID3D12GraphicsCommandList* commands)
     {
         throw std::logic_error("Timestamp slot is not safe to reuse.");
     }
-    commands->EndQuery(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2);
+    commands->EndQuery(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 4);
 }
 void GpuTimer::End(UINT slot, ID3D12GraphicsCommandList* commands)
 {
-    commands->EndQuery(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
-    commands->ResolveQueryData(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2,
-                               readback_.Get(), slot * 2 * sizeof(UINT64));
+    commands->EndQuery(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 4 + 1);
+    commands->ResolveQueryData(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 4, 2,
+                               readback_.Get(), slot * 4 * sizeof(UINT64));
+}
+void GpuTimer::BeginPost(UINT slot, ID3D12GraphicsCommandList* commands)
+{
+    commands->EndQuery(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 4 + 2);
+}
+void GpuTimer::EndPost(UINT slot, ID3D12GraphicsCommandList* commands)
+{
+    commands->EndQuery(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 4 + 3);
+    commands->ResolveQueryData(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 4 + 2, 2,
+                               readback_.Get(), (slot * 4 + 2) * sizeof(UINT64));
 }
 void GpuTimer::Submitted(UINT slot, UINT64 fence_value, FrameTiming timing)
 {
@@ -93,13 +103,25 @@ void GpuTimer::Poll(UINT64 completed_fence)
             continue;
         }
         UINT64 values[2]{};
-        std::memcpy(values, mapped_ + index * 2 * sizeof(UINT64), sizeof(values));
+        std::memcpy(values, mapped_ + index * 4 * sizeof(UINT64), sizeof(values));
         if (values[1] < values[0])
         {
             throw std::runtime_error("GPU timestamps out of order.");
         }
         slot.timing.gpu_pass_ms =
             static_cast<double>(values[1] - values[0]) * 1000.0 / static_cast<double>(frequency_);
+        if (slot.timing.postprocess != PostProcess::None)
+        {
+            UINT64 post_values[2]{};
+            std::memcpy(post_values, mapped_ + (index * 4 + 2) * sizeof(UINT64),
+                        sizeof(post_values));
+            if (post_values[1] < post_values[0] || post_values[0] < values[1])
+            {
+                throw std::runtime_error("GPU post timestamps out of order.");
+            }
+            slot.timing.gpu_post_ms = static_cast<double>(post_values[1] - post_values[0]) *
+                                      1000.0 / static_cast<double>(frequency_);
+        }
         if (completed_.size() == 256)
         {
             ++dropped_;
@@ -116,7 +138,7 @@ std::vector<FrameTiming> GpuTimer::TakeCompleted()
     std::vector<FrameTiming> output;
     output.swap(completed_);
     std::sort(output.begin(), output.end(),
-              [](const auto& a, const auto& b) { return a.presentation < b.presentation; });
+              [](const auto& a, const auto& b) { return a.frame_number < b.frame_number; });
     return output;
 }
 } // namespace tinyme

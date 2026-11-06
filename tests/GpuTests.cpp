@@ -497,7 +497,8 @@ void TestTiming(bool gpu_validation)
     std::cout << "timing samples=18 bounded_dropped=4 gpu_validation=" << gpu_validation << '\n';
 }
 
-void TestIncompleteProfiles(bool gpu_validation)
+void TestIncompleteProfiles(bool gpu_validation,
+                            tinyme::PostProcess postprocess = tinyme::PostProcess::None)
 {
     for (unsigned action = 0; action < 4; ++action)
     {
@@ -558,6 +559,7 @@ void TestIncompleteProfiles(bool gpu_validation)
         options.profile = {true, 0, 240};
         options.debug_layer = true;
         options.gpu_validation = gpu_validation;
+        options.postprocess = postprocess;
         const auto result = tinyme::RunWindowedSession(title, options);
         driver.request_stop();
         driver.join();
@@ -592,6 +594,7 @@ int main(int argc, char* argv[])
         TestCamera(gpu_validation);
         TestTiming(gpu_validation);
         TestIncompleteProfiles(gpu_validation);
+        TestIncompleteProfiles(gpu_validation, tinyme::PostProcess::Copy);
         std::cout << "gpu_total checks=" << checks << " failures=0\n";
         return 0;
     }

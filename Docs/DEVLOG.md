@@ -2,6 +2,23 @@
 
 倒序追加，只记值得长期保留的节点。当前任务状态见 [STATE](STATE.md)，决定原文见 [ADR 索引](Decisions/README.md)。不以本文件复制全部代码改动或会话记录。
 
+## 2026-11-06 — 整个M3验收：幼年期工程出口完成
+
+- M3-001/002/003全部实现验收，不在RTT完成后停止。0.6.0基于已发布M2 1fad4a6；本轮已完成两种pass组合、copy/grayscale及实际post shader反色替换/恢复、Editor/Runtime共享调参、真正无窗口GPU、PNG/JSON复现与两套实验。
+- [ADR-0008](Decisions/ADR-0008-explicit-passes-and-offscreen-gpu.md)落实每slot scene/output、显式barrier与capture fence；[ADR-0009](Decisions/ADR-0009-m3-architecture-review.md)完成保留/调整复盘。仍无通用RHI/Graph/场景/资产/UI，不复制renderer，normalRender无pixel readback。
+- 首次实际RT清屏ID820用optimized clear与clear变更冷资源边界修复而非隐藏；post shader-linkage候选分类补齐；旧profile用户错误文案恢复，测试门槛不削弱。M2桌面RGB采集瞬态失败保留日志，容差2未改，最终GPU/GBV全部通过。
+- 双配置默认128/128、Editor OFF67/67、GPU opt-in138/138；M2+post中断GPU1740、M3全图460718、CLI752、PNG独立WIC45、报告91、相机151、DXC14检查。大量460718是逐像素断言，不冒称这么多独立功能。copy fullimage max0、grayscale max1；32帧尾样本与capture不增frame均验证。
+- 六组两入口direct/copy/grayscale优化120样本实采完整，同输入direct/copy PNG全字节相同，两灰度也相同；数据在EXP-0002，不用无VSYNC/小数值证明优化优势。headless逻辑、窗口present、offscreen提交frame三语义严格区分。
+- 默认verify/test与CTest presets显式排除GPU，实际缓存ON验证仍只128无GPU项后恢复OFF。正常工作和安全释放意外warning/error/live child为0；根签名ID690与linkageID666为预期候选拒绝，明确打印。
+- GPU新上传/capture OOM/Signal/等待/设备移除未故障注入，PNG与report不是两文件原子事务，已列未测与部分发布限制。最后正常Git提交/推送按所有者新授权进行；本轮止于M3，下一最小深度切片只登记Ready不继续编码。
+
+## 2026-11-06 — M3开工：两种pass组合与无窗口GPU
+
+- M2基准1fad4a6已正常提交并推送到既有origin/main。整个M3按三切片推进，本轮不得在M3-001结束时停止；STATE是唯一当前任务源。
+- [ADR-0008](Decisions/ADR-0008-explicit-passes-and-offscreen-gpu.md)确定direct对照、scene颜色纹理+copy/grayscale、GPU-only target分支与显式最后帧PNGcapture；不复制renderer或预建Graph/RHI/UI。资源与scene/post时间范围分别解释，offscreen不冒称present。
+- 默认verify/test明确排除GPU标签，修复缓存曾设GPU tests ON时“默认无GPU”不可靠的契约漏洞；GPU批处理也须显式验收。
+- 当前正在实现，尚未验证或完成整个M3。新建实验/架构复盘须包含真正同输入对照与资源/计时证据，不以计划替代结果。
+
 ## 2026-11-06 — 新授权与M2基准提交
 
 - 所有者允许agent随时向既有GitHub远端正常提交/推送已验证成果，并明确本轮完成整个M3再停下；授权写入协作规范/Agent入口，不改写历史或提交工具数据。

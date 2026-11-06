@@ -30,6 +30,13 @@ int main()
         const auto ps = tinyme::CompileShader(source, snapshot, L"PSMain", L"ps_6_0");
         Check(vs.IsValid() && vs.diagnostics.empty(), "Default vertex compilation");
         Check(ps.IsValid() && ps.diagnostics.empty(), "Default pixel compilation");
+        const auto post_source = tinyme::tests::ExecutableDirectory() / L"shaders/PostProcess.hlsl";
+        const auto post_snapshot = tinyme::ReadShaderSource(post_source, diagnostics);
+        Check(!post_snapshot.empty() && diagnostics.empty(), "Deployed post source exists");
+        Check(tinyme::CompileShader(post_source, post_snapshot, L"VSMain", L"vs_6_0").IsValid(),
+              "Full-screen post VS compiles without GPU");
+        Check(tinyme::CompileShader(post_source, post_snapshot, L"PSMain", L"ps_6_0").IsValid(),
+              "Copy and grayscale post PS compiles without GPU");
         const auto missing_entry =
             tinyme::CompileShader(source, snapshot, L"DoesNotExist", L"ps_6_0");
         Check(!missing_entry.IsValid() && !missing_entry.diagnostics.empty(),

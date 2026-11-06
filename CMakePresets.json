@@ -38,6 +38,7 @@
       "configurePreset": "windows-vs2022",
       "configuration": "Debug",
       "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "GPU" } },
       "execution": { "noTestsAction": "error" }
     },
     {
@@ -45,6 +46,7 @@
       "configurePreset": "windows-vs2022",
       "configuration": "RelWithDebInfo",
       "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "GPU" } },
       "execution": { "noTestsAction": "error" }
     }
   ]

@@ -1,6 +1,6 @@
 # 架构与契约
 
-## 1. 已实现结构（M2-003）
+## 1. 已实现结构（M3已验收）
 
 依赖箭头从使用者指向被使用者；本节只描述真实代码。
 
@@ -22,9 +22,9 @@ GPU tests ── tinyme_d3d12 + tinyme_windows + tinyme_windowed_runtime
 - `Session` 仍只拥有逻辑 tick/模拟时间，不依赖窗口、GPU、Editor。`WindowedSession` 是单独的组合实现，不把 GPU 依赖带入 Core 测试 target；报告测试链接窗口组合但只执行纯序列化、文件与窗口创建前失败路径。
 - `tinyme_windows` 拥有一个 Win32 HWND；`tinyme_d3d12` 是具体清屏/三角形实现，通过 PImpl 隐藏 COM 细节，不是通用 RHI。
 - `RunWindowedSession` 位于 Runtime 层，依次构造 Window → Renderer → Session。显式 Renderer Shutdown 后才允许 Window 析构。
-- 无参数显示帮助；`--headless` 保持无窗口/无 GPU，默认 1 个逻辑 tick；`--windowed` 运行 GPU 窗口，默认持续到关闭/Escape。模式互斥。
-- `--frames 1..1000000` 必须配模式；headless 计数逻辑 tick，windowed 计数成功呈现。未显式指定窗口帧数才无限执行，显式 0 拒绝。
-- `--debug-layer`、`--gpu-validation` 仅用于窗口。Debug 默认启用 Debug Layer；优化构建可显式开启；GBV 隐含 Debug Layer。缺少调试组件时报错而非静默禁用。
+- 无参数显示帮助；headless保持无窗口/无GPU、默认1逻辑tick；windowed运行GPU窗口、默认持续到关闭/Escape；offscreen独立无窗口GPU、默认有限1帧。三个显式模式互斥。
+- `--frames 1..1000000`必须配模式；分别计逻辑tick、成功present、GPU提交frame，不把capture计帧。窗口未指定帧数且无profile才无限，显式0拒绝。
+- `--debug-layer`、`--gpu-validation`仅用于两GPU模式。Debug默认启用Debug Layer；优化构建可显式开启，GBV隐含Debug Layer；缺组件报错，不静默禁用。
 - 退出码：`0` 成功，`1` 初始化/运行失败，`2` 参数错误。帮助/版本独占使用，所有非法输入先于窗口初始化拒绝。
 - `TINYME_BUILD_EDITOR=OFF` 不影响 Runtime；默认 CTest 不打开窗口或初始化 GPU。`TINYME_ENABLE_GPU_TESTS=ON` 显式登记交互 GPU 测试。
 - `--experiment triangle|clear` 选择窗口实验，默认 triangle；`--shader PATH` 指定三角形源码。默认从程序旁 `shaders/Triangle.hlsl` 读取，自定义路径相对工作目录。headless 不接受这些 GPU 选项。
@@ -111,3 +111,18 @@ Core ← 被必要的上层模块复用；不反向依赖任何模块
 - 输入签名不兼容仅消费明确的Debug Layer候选拒绝消息，未知API/设备错误仍faulted；真正未绑定资源测试使用b2。新增资源沿已有WaitIdle/设备移除规则释放，live child在释放后检查。
 
 取舍与重审触发见 [ADR-0007](Decisions/ADR-0007-indexed-triangle-and-camera.md)。M2-003双配置、Editor OFF、GPU/GBV及像素/矩阵验收已完成，证据见STATE与EXP-0001；这里只支持固定索引三角形与最小相机，不等于通用网格/场景系统。
+
+## 9. 显式pass组合与独立GPU批处理（M3已实现）
+
+- 具体模式为direct、RTT-copy、RTT-grayscale，场景与后处理各自PSO/root signature/generation。算法通过同一纹理输入的PS实现与单DWORD选择实际替换，不预建Graph/RHI；两应用组合/调参/重载仍依赖同一Runtime。
+- 每slot拥有最终output和可选scene纹理；窗口output来自swapchain，offscreen来自DEFAULT RGBA8纹理。固定RTV[0..1]输出/[2..3]scene，SRV[0..1]scene。slot fence完成后复用；scene PSR→RT→PSR，output COMMON/PRESENT→RT→COMMON/PRESENT。resize或切换资源组合显式WaitIdle后维护descriptor。
+- RT纹理创建带实际optimized clear，首次验证ID820已修复；API改变clear值属于冷边界，先idle再重建匹配颜色，不屏蔽warning。不变输入正常Render只保留M2 slot复用等待，不加全队列idle或像素readback。
+- post根签名PS t0 table和PS b0单DWORD，整像素Load不加sampler。copy原值、grayscale Rec709数值权重且alpha保持；当前UNORM域，不宣称linear/sRGB色彩管理。旧scene b0八DWORD/b1十六DWORD不变，两个shader使用固定DXC与各自完整主源码快照。
+- F5针对已启用scene/post各自事务候选，语法/明确根签名或shader-linkage拒绝保留该pass旧PSO，未知/设备错误仍fatal。没有跨shader多文件事务，不在后台编译；请求使保守完整性报告失效。
+- GPU timer扩展为每slot四query（scene前后、post前后），8query/64字节readback。原gpu_pass仍scene clear/draw，新增gpu_post仅全屏draw，barrier/resolve不计二者；无post时null，不假装两段之和等于整帧。frame_number是真实GPU提交，presentation只标窗口成功呈现；offscreen始终0。
+- Runtime区分headless纯逻辑、windowedGPU、offscreenGPU。offscreen不创建Window/ HWND/swapchain，不Present，默认有限1帧，profile预算保持；分辨率1..2048。它复用Renderer device/slot/draw分支，不复制设备/PSO实现。
+- CaptureRgba只允许已渲染的offscreen输出，显式等最后fence、CopyTextureRegion/restore、capture fence完成，再Map逐行剥离pitch。capture readback是Renderer成员，提交失败也不局部提前释放；命令不计frame/present/timestamp样本。正常Render与TakeCompletedTimings无像素readback。
+- WIC只在CPU编码边界运行：内存stream PNG，top-down packed RGBA8，再复用独占CREATE_NEW写；CPU无GPU测试独立验证PNG。report/capture父目录/存在/路径别名前置GPU检查，不承诺两文件事务/崩溃原子发布。
+- 默认verify/test显式排除GPU标签，即使缓存GPUtestsON仍不执行GPU；GPU opt-in串行执行窗口与无窗口批处理，实际出口由STATE维护。
+
+边界取舍见 [ADR-0008](Decisions/ADR-0008-explicit-passes-and-offscreen-gpu.md)，实际两套对照和六组实采见EXP-0001/ [EXP-0002](../experiments/EXP-0002-postprocess/README.md)。完整M3六组合、GPU/GBV、算法替换/恢复与PNG验收通过，证据在STATE；保留/调整架构复盘见 [ADR-0009](Decisions/ADR-0009-m3-architecture-review.md)。

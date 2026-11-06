@@ -11,5 +11,7 @@
 | [ADR-0005](ADR-0005-dxc-and-transactional-shader-reload.md) | Accepted | 固定 DXC、主文件快照、事务 PSO 与人工 F5 | 第二个资源契约、编译停顿或多文件一致性需求 |
 | [ADR-0006](ADR-0006-experiment-parameters-and-timing.md) | Accepted | 32 字节 root constants、独立 CPU/GPU 范围、fence-safe 采样与报告完整性 | 更大/不同参数、多个 pass/queue 或持续后台采样 |
 | [ADR-0007](ADR-0007-indexed-triangle-and-camera.md) | Accepted | 静态DEFAULT VB/IB、初始化上传fence、row-major左手相机与矩阵root constants | 第二个网格、动态上传、模型变换、深度测试或参数增长 |
+| [ADR-0008](ADR-0008-explicit-passes-and-offscreen-gpu.md) | Accepted | direct/RTT后处理、独立无窗口GPU、分段计时与显式PNG捕获 | 第三个pipeline、跨queue或动态依赖出现实际维护负担 |
+| [ADR-0009](ADR-0009-m3-architecture-review.md) | Accepted | 整个M3的保留/调整边界复盘、默认无GPU守卫与未测故障 | 第三pass组合、跨queue、动态target/资产或实际重复维护成本 |
 
 新增文档使用 `ADR-XXXX-short-topic.md`，包含：日期、状态、关联任务、背景、选项、决定、代价、验证、重审触发。替代决定必须双向链接，不覆盖旧结论。

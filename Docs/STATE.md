@@ -4,11 +4,11 @@
 
 ## 1. 当前定位
 
-- 幼年期：M0、M1与M2已完成工程验收；M2-001/002/003组成首条可复现索引几何/相机/shader/参数/计时链。M3及整个幼年期尚未完成。
-- 版本0.5.0，基于834c297（已发布0.3.0）的已验证未提交工作区；本轮没有提交或推送。实时差异以Git为准，.codebuddy工具数据保留，不当作本轮源码交付物。
-- 2026-11-06所有者新授权随时向既有GitHub origin正常提交/推送已验证成果，并要求完成整个M3再停下；不复用旧授权、不改写历史、不选择新许可证。当前先保存已验收M2基准，随后完成M3两种pass组合/算法替换/无窗口GPU复现与架构复盘。
-- 已实现：Win32/D3D12窗口、clear/索引triangle、静态DEFAULT VB/IB与安全上传、左手透视相机/resize宽高比、固定DXC、F5事务重编译、共享相机/tint/scale输入、独立CPU/GPU计时与含相机/几何的JSON、纯逻辑headless、诊断与安全退出。
-- 未实现：通用网格/资产加载、模型变换/深度附件、场景、Editor UI、离屏GPU、Render Graph、物理、后台编译或通用材质/Profiler。
+- 幼年期M0–M3工程出口全部验收：至少两种pass组合、真实算法替换、Editor/Runtime共享调参、独立无窗口GPU复现、两套实验与架构保留/调整ADR齐备。成长期未开工，仍不是完整通用引擎。
+- 版本0.6.0，M2基准1fad4a6已正常提交推送；本轮M3代码/知识已通过六组合验收，Git发布收尾进行。最后提交信息以Git和本节最终发布记录为准；.codebuddy工具数据保留但不提交。
+- 2026-11-06所有者授权随时向既有GitHub origin正常提交/推送已验证成果，并要求完成整个M3再停下；没有改写历史、变更远端或选择许可证。
+- 已实现：M2窗口/索引相机/共享参数/DXC/F5链、direct/RTT-copy/grayscale、两入口共享scene/post独立计时、独立offscreen有限GPU与最后帧PNG、含两generation和frame_number的JSON、pure headless及safe shutdown。
+- 未实现：通用网格/资产加载、模型变换/深度附件、场景、Editor UI、Render Graph、物理、后台编译或通用材质/Profiler。PNG捕获不是持续正常帧readback，无跨平台/多GPU承诺。
 
 ## 2. 紧邻队列
 
@@ -19,9 +19,12 @@
 | M2-001 | Done | 固定DXC + 可重编译HLSL三角形 | 本节与EXP-0001 |
 | M2-002 | Done | 实验参数数据契约与CPU/GPU独立计时 | 本节第4部分、ADR-0006与EXP-0001 |
 | M2-003 | Done | 最小索引网格与相机变换 | 第5部分、ADR-0007与EXP-0001；六组合验收通过 |
-| M3-001 | Ready | 离屏颜色目标与可替换全屏后处理 | 两种pass组合、明确资源barrier/计时、同输入算法替换与相机/F5回归；开工时细化 |
+| M3-001 | Done | direct对照、颜色纹理与copy/grayscale全屏pass | 第6部分、ADR-0008、同输入图像与实际post替换 |
+| M3-002 | Done | 独立无窗口GPU与PNG捕获 | 两入口无HWND/swapchain/Present；有限帧与PNG/JSON复现 |
+| M3-003 | Done | 架构复盘与完整阶段验收 | 两套实验、ADR-0009、六组合GPU/GBV均通过；Git收尾见定位 |
+| G1-001 | Ready | 成长期首切片：最小深度附件与遮挡对照 | 仅固定几何深度正确性/生命周期；开工细化，尚未实现 |
 
-当前无活动编码任务。M2-003已完成第5部分验收；没有提交/推送，没有开始M3编码。下一切片M3-001在第6部分细化范围；不是立即建立Render Graph/场景/资产平台。任务与交接规则见 [知识管理](KNOWLEDGE.md)。
+整个M3已完成编码和验收，当前仅Git发布/最终交接收尾；不继续启动成长期代码。无场景、资产、Graph、UI或新框架。任务与交接规则见 [知识管理](KNOWLEDGE.md)。
 
 ## 3. M2-001验收
 
@@ -133,21 +136,52 @@ Editor选项完全相同；无相机选项为默认eye0/0/-2、target0/0/0、up0
 
 独立配置/CTest命令沿用第3部分。最新六组合日志：`out/m2-003-final-verify-<Configuration>.log`、`out/m2-003-final-runtime-only-<Configuration>.log`、`out/m2-003-final-gpu-validation-<Configuration>.log`。开发入口gpu-test也实际复跑两配置并通过，日志`out/m2-003-gpu-entry-<Configuration>.log`；首次GPU修复后的单独执行日志`out/m2-003-gpu-Debug.log`。两份优化实采JSON/日志`out/m2-003-profile-{runtime,editor}-RelWithDebInfo.{json,log}`，长期数值在EXP-0001。产物忽略，不作为知识唯一源。
 
-## 6. 下一切片：M3-001
+## 6. 整个M3验收与复现
 
-目标：离屏颜色目标与可替换全屏后处理，首次验证真正不同pass组合和同输入算法替换。
+2026-11-06，0.6.0，基于已推送1fad4a6/M2；Windows x64/VS2022 v143、固定DXC1.8.2505.32、RTX5080驱动577.00，依赖/平台未升级。整个M3由M3-001/002/003完成，非只完成RTT。契约见 [ADR-0008](Decisions/ADR-0008-explicit-passes-and-offscreen-gpu.md)，保留/调整复盘见 [ADR-0009](Decisions/ADR-0009-m3-architecture-review.md)，两套实验为 [EXP-0001](../experiments/EXP-0001-triangle/README.md) / [EXP-0002](../experiments/EXP-0002-postprocess/README.md)。
 
-- 保留当前直接三角形路径作为对照；新增渲染到颜色纹理再全屏输出的显式顺序，解释每个资源、barrier和计时范围。
-- 以两种简单全屏处理实现实际可替换算法，而非只搭空接口；继续让Editor/Runtime复用Runtime路径，不加入通用RHI、Scene、资产平台或Render Graph。
-- 渲染到离屏纹理不等于无窗口GPU；无窗口GPU需独立执行模式与捕获/有限预算契约，不复用纯逻辑headless。具体离屏执行与导出安排在该切片开工时决定。
-- 通过同输入画面/数值对照、参数/相机/F5/clear/headless回归与GPU生命周期验收；现在未实现。没有阻塞，不复用先前发布授权。
+| 范围 | Debug | RelWithDebInfo |
+| --- | --- | --- |
+| 默认无GPU CTest，Editor+Runtime | 128/128 | 128/128 |
+| Editor OFF独立目录 | 67/67 | 67/67 |
+| GPU opt-in独立目录，CPU+10显式GPU项 | 138/138 | 138/138 |
 
-## 7. 已知限制与未测项
+- Core原165与Camera151检查保留；新三模式/CLI/pipeline752检查、PNG独立WIC解码45检查、报告91检查、DXC14检查。报告保留六类I/O故障注入与并发不覆盖，并新增offscreen无present、独立post统计、capture状态、窗口/离屏前置拒绝和Win32尾随点/空格/ADS。
+- M2/M3窗口GPU每配置GBV开/关各1740检查：原窗口/相机/静态上传/参数/F5/计时/18样本及256队列/4dropped保留，加post启用下F5/最小化/resize/关闭四类会话中断。
+- 专项M3 GPU每配置GBV开/关各460718检查，其中大部分是全图每像素灰度一致性；全图copy max_error=0，灰度独立量化参考max_error=1。640×360与641×359、非对称相机/scale/tint、RGBA alpha/top-down、17×13、32提交帧尾样本、捕获不增frame/present、场景/post独立generation、模式切换、resize、冷clear重建、网格上传fence保持、安全释放全部通过。
+- actual post shader反色替换再恢复，图像改变/恢复，scene generation不变；缺文件/语法/未绑定t1(ID690)/VS-PS TEXCOORD链接(ID666)只拒绝候选并明确打印，旧PSO继续。正常GPU/释放意外warning/error/live child均0，不把预期候选错误冒称不存在。
+- 两入口真实CLI跑windowed copy/grayscale、offscreen同模式+641×359+2预热/3样本PNG、clear单帧尾样本/无scene元数据、defaultoffscreen1帧、shader失败无PNG、既存/缺父目录/路径别名GPU前拒绝。headless仍纯逻辑。程序从非仓库工作目录读取已部署两个shader。
+- 同输入两入口共六组优化无验证层实采，30预热/120样本，timestamp频率1000000000Hz、complete=true、frame_number31..150、presentation0、VSYNCoff。Runtime/Editor的direct/copy PNG完整字节相同，两灰度PNG也相同；图像/独立CPU/scene/post数值长期记录在EXP-0002，不据微小差异宣布性能收益。
+- 默认verify/test与CTest preset显式排除GPU标签；已实际将默认目录缓存GPU tests ON后执行verify，仅128无GPU项，preset列举128，随后恢复OFF，日志`out/m3-stale-gpu-cache-no-gpu.log`。
+- 实际初次问题：RT纹理无optimized clear ID820，已提供真实值并支持clear变更冷边界重建，不屏蔽warning；post linkage拒绝分类补齐；两应用旧profile错误文案new output path恢复，不修改旧断言。一次M2桌面RGB采集瞬态失败保留证据，原容差2重跑与最终两配置GPU全通过，未扩大容差。
+- /W4/WX、clang-format19.1.5、IDE诊断、严格UTF-8/LF、相对文档链接及Git diff检查纳入最后发布。GPUTest只在显式命令执行，capture是显式copy/wait，不混入正常Render/样本。
 
-- root签名为b0八DWORD参数+b1十六DWORD矩阵，只支持固定VS/PS索引三角形；无通用材质/反射/参数UI、资产加载、深度buffer或模型变换。tint alpha写输出但当前不透明PSO不启用合成。
-- 首次上传Signal/WaitForFence失败由既有faulted/设备移除/Shutdown边界处理，staging不在提交后的局部栈展开中提前释放；未对新上传路径实际注入OOM/Signal/等待超时，因此不能用正常生命周期测试冒充故障覆盖。
-- 同步F5允许GPU idle/编译停顿；无后台重载/监听/缓存、完整include原子快照。Debug CPU下shader仍O3，无shader调试符号/PIX。
-- GPU计时只含clear+可选draw，CPU只含命令录制及计时命令开销，均非整帧；VSYNC仍开启。三角形耗时很小、验证/驱动/调度影响明显，没有性能回归阈值、受控时钟或引擎整体benchmark。
+根目录复现，输出为新文件、父目录存在：
+
+```powershell
+powershell -NoProfile -File tools/dev.ps1 verify -Configuration Debug
+powershell -NoProfile -File tools/dev.ps1 verify -Configuration RelWithDebInfo
+powershell -NoProfile -File tools/dev.ps1 gpu-test -Configuration Debug
+powershell -NoProfile -File tools/dev.ps1 gpu-test -Configuration RelWithDebInfo
+.\out\build\windows-vs2022\bin\RelWithDebInfo\tinyme_runtime.exe --offscreen --postprocess grayscale --width 641 --height 359 --camera-eye 0.25 0.125 -3 --camera-target 0.25 0.125 0 --fov 75 --scale 0.75 --tint 1 0.8 0.6 0.5 --profile --warmup 30 --samples 120 --capture out/m3-new-gray.png --report out/m3-new-gray.json
+.\out\build\windows-vs2022\bin\Debug\tinyme_editor.exe --windowed --postprocess grayscale --post-shader shaders/PostProcess.hlsl
+```
+
+copy/none对照仅换postprocess，另用新输出名；Editor和Runtime参数完全共用。两GPU模式尺寸1..2048，offscreen默认1帧、窗口未设frames/profile才无限；headless/ticks、windowed/presentations、offscreen/frame_number语义分开。F5重载启用的scene/post各自候选；任何请求使保守会话采样不完整，不承诺多shader事务。clear+post有效且scene compiler/geometry/camera为null。
+
+最终六组合日志：`out/m3-final-verify-<Configuration>.log`、`out/m3-final-runtime-only-<Configuration>.log`、`out/m3-final-gpu-validation-fixed-<Configuration>.log`；首次失配日志`out/m3-final-gpu-validation-Debug.log`保留。开发gpu-test完整入口另存`out/m3-gpu-entry-<Configuration>.log`。实采`out/m3-measure-{runtime,editor}-{none,copy,grayscale}.{json,png,log}`，产物忽略，不作为知识唯一源。
+
+## 7. 下一阶段与止点
+
+整个M3结束后按所有者要求停止本轮编码。下一Ready切片G1-001仅建议最小深度附件/遮挡对照：在固定几何中验证深度状态、尺寸资源、安全释放、同输入direct/RTT/offscreen回归；开工时再细化，不先搭Scene/ECS/资产/UI/Graph。成长期框架化或扩大平台仍属需所有者决策的范围。
+
+## 8. 已知限制与未测项
+
+- scene root签名b0八DWORD参数+b1十六DWORD矩阵；post独立PS t0 table+PS b0单DWORD。仅固定三角形与明确copy/grayscale契约，无通用材质/反射/UI、资产加载、深度buffer或模型变换。tint alpha写输出但当前不透明PSO不启用合成。
+- 上传/capture的Signal/WaitForFence失败沿已有faulted/设备移除/Shutdown边界处理，staging/readback由Renderer持有，不提交后局部提前释放；新GPU路径未实际注入OOM/Signal/等待超时，正常生命周期测试不替代故障实测。
+- 同步F5与resize/模式组合/clear值变更冷边界允许GPU idle；无后台重载/监听/缓存、完整include/多shader原子事务。Debug CPU下HLSL仍O3，无shader调试符号/PIX。
+- CPU录制、GPU scene clear/draw、GPU post fullscreen draw独立；都不含整帧/fence/Present/capture。窗口VSYNCon、offscreen无Present/VSYNCoff。小三角形调度/时钟影响明显，没有性能回归阈值或引擎整体benchmark。
+- PNG仅最后成功offscreen帧显式capture边界；WIC内存编码和CREATE_NEW不覆盖，不承诺PNG/JSON两文件事务。PNG写成功而JSON后续失败可保留完整PNG，诊断失败不声称完整发布；不保证断电/进程崩溃无半成品。UNORM域灰度不是sRGB/linear色彩管理。
 - JSON记录版本/路径而非完整shader依赖摘要；复现须保留对应Git基准、工作区shader和输入，不能仅靠路径独立还原代码。已有输出不覆盖，父目录不自动创建；失败按自身独占句柄尝试清理并明确清理错误，关闭失败限次重试。六类可检测I/O失败已有真实句柄故障注入，但未实际填满磁盘、触发底层flush/close故障、进程崩溃或断电；直接写正式路径不是原子发布，不保证上述崩溃场景无半成品。
 - 尚未人为触发TDR/设备移除/超时/OOM/timestamp倒序；正常GPU通过不替代故障实测。跨屏DPI与纯DXGI遮挡路径未单独实测，最小化/resize/F5/关闭已测；其他M1限制见ADR-0004。
 - 单窗口/主线程、SDR/VSYNC，无自动设备恢复、无集显/WARP降级。PIX未验证；固定DXC安装脚本尚未在第二空目录重装，现有包/部署摘要核验通过。
