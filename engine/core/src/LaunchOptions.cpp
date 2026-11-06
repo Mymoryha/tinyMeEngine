@@ -1,6 +1,7 @@
 #include <tinyme/core/LaunchOptions.h>
 
 #include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <system_error>
 
@@ -32,6 +33,14 @@ ParseResult ParseCommandLine(std::span<const std::string_view> arguments)
     bool has_frames = false;
     bool has_experiment = false;
     bool has_shader = false;
+    bool has_scale = false;
+    bool has_tint = false;
+    bool has_warmup = false;
+    bool has_samples = false;
+    bool has_report = false;
+    bool has_camera_eye = false;
+    bool has_camera_target = false;
+    bool has_fov = false;
     for (std::size_t index = 0; index < arguments.size(); ++index)
     {
         const auto argument = arguments[index];
@@ -56,6 +65,137 @@ ParseResult ParseCommandLine(std::span<const std::string_view> arguments)
                 return result;
             }
             enabled = true;
+        }
+        else if (argument == "--profile")
+        {
+            if (result.options.profile.enabled)
+            {
+                result.error = "Duplicate --profile.";
+                return result;
+            }
+            result.options.profile.enabled = true;
+        }
+        else if (argument == "--scale" || argument == "--tint")
+        {
+            auto& seen = argument == "--scale" ? has_scale : has_tint;
+            const std::size_t components = argument == "--scale" ? 1 : 4;
+            if (seen || arguments.size() - index - 1 < components)
+            {
+                result.error =
+                    "--scale requires one float; --tint requires RGBA, each option once.";
+                return result;
+            }
+            seen = true;
+            for (std::size_t component = 0; component < components; ++component)
+            {
+                const auto value = arguments[++index];
+                float number = 0.0F;
+                if (value.empty())
+                {
+                    result.error = "Empty float parameter.";
+                    return result;
+                }
+                const auto parsed =
+                    std::from_chars(value.data(), value.data() + value.size(), number);
+                if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
+                {
+                    result.error = "Invalid float parameter.";
+                    return result;
+                }
+                if (argument == "--scale")
+                {
+                    result.options.parameters.scale = number;
+                }
+                else
+                {
+                    result.options.parameters.tint[component] = number;
+                }
+            }
+        }
+        else if (argument == "--camera-eye" || argument == "--camera-target" || argument == "--fov")
+        {
+            auto& seen = argument == "--camera-eye"      ? has_camera_eye
+                         : argument == "--camera-target" ? has_camera_target
+                                                         : has_fov;
+            const std::size_t components = argument == "--fov" ? 1 : 3;
+            if (seen || arguments.size() - index - 1 < components)
+            {
+                result.error = "--camera-eye / --camera-target require XYZ; --fov one degree "
+                               "value, each once.";
+                return result;
+            }
+            seen = true;
+            for (std::size_t component = 0; component < components; ++component)
+            {
+                const auto value = arguments[++index];
+                float number = 0.0F;
+                if (value.empty())
+                {
+                    result.error = "Empty camera parameter.";
+                    return result;
+                }
+                const auto parsed =
+                    std::from_chars(value.data(), value.data() + value.size(), number);
+                if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+                    !std::isfinite(number))
+                {
+                    result.error = "Camera parameters must be complete finite floats.";
+                    return result;
+                }
+                if (argument == "--fov")
+                {
+                    result.options.camera.vertical_fov_degrees = number;
+                }
+                else
+                {
+                    auto& destination = argument == "--camera-eye" ? result.options.camera.eye
+                                                                   : result.options.camera.target;
+                    destination[component] = number;
+                }
+            }
+        }
+        else if (argument == "--warmup" || argument == "--samples")
+        {
+            auto& seen = argument == "--warmup" ? has_warmup : has_samples;
+            if (seen || index + 1 == arguments.size())
+            {
+                result.error = "Missing/duplicate sample budget.";
+                return result;
+            }
+            seen = true;
+            const auto value = arguments[++index];
+            std::uint32_t count = 0;
+            if (value.empty())
+            {
+                result.error = "Empty sample budget.";
+                return result;
+            }
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), count);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+                count > 100000 || (argument == "--samples" && count == 0))
+            {
+                result.error = "--warmup: [0,100000]; --samples: [1,100000].";
+                return result;
+            }
+            if (argument == "--warmup")
+            {
+                result.options.profile.warmup_frames = count;
+            }
+            else
+            {
+                result.options.profile.sample_frames = count;
+            }
+        }
+        else if (argument == "--report")
+        {
+            if (has_report || index + 1 == arguments.size() || arguments[index + 1].empty() ||
+                arguments[index + 1].starts_with("--"))
+            {
+                result.error = "Missing/duplicate report path.";
+                return result;
+            }
+            has_report = true;
+            result.options.report_path = arguments[++index];
         }
         else if (argument == "--experiment" || argument == "--shader")
         {
@@ -128,6 +268,56 @@ ParseResult ParseCommandLine(std::span<const std::string_view> arguments)
     {
         result.error = "--shader requires the triangle experiment.";
         return result;
+    }
+    if ((has_scale || has_tint || result.options.profile.enabled || has_warmup || has_samples ||
+         has_report) &&
+        result.options.mode != ExecutionMode::WindowedGpu)
+    {
+        result.error = "Parameters/profiling require --windowed.";
+        return result;
+    }
+    if ((has_scale || has_tint) && result.options.experiment != "triangle")
+    {
+        result.error = "Triangle parameters cannot be used with clear.";
+        return result;
+    }
+    if (!IsValid(result.options.parameters) || !IsValid(result.options.profile))
+    {
+        result.error = "--scale must be finite [0.01,2]; --tint finite RGBA [0,1].";
+        return result;
+    }
+    if ((has_camera_eye || has_camera_target || has_fov) &&
+        (result.options.mode != ExecutionMode::WindowedGpu ||
+         result.options.experiment != "triangle"))
+    {
+        result.error = "Camera options require the windowed triangle experiment.";
+        return result;
+    }
+    if (!IsValid(result.options.camera))
+    {
+        result.error = "Invalid camera: finite eye/target [-10000,10000], nondegenerate view, "
+                       "and --fov [10,120] required.";
+        return result;
+    }
+    if ((has_warmup || has_samples || has_report) && !result.options.profile.enabled)
+    {
+        result.error = "--warmup / --samples / --report require --profile.";
+        return result;
+    }
+    if (result.options.profile.enabled)
+    {
+        const auto budget =
+            result.options.profile.warmup_frames + result.options.profile.sample_frames;
+        if (has_frames && result.options.frame_count < budget)
+        {
+            result.error = "--frames must cover warmup plus requested samples.";
+            return result;
+        }
+        if (!has_frames)
+        {
+            result.options.frame_count = budget;
+            has_frames = true;
+        }
     }
     result.options.has_frame_limit = has_frames;
     result.options.action = LaunchAction::Run;

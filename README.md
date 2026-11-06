@@ -2,7 +2,7 @@
 
 面向个人学习与渲染研究的 Windows C++ 小型引擎。目标不是复刻商业引擎，而是让一个渲染想法能够被清晰实现、观察、验证和复现，并让未来的人或 agent 能够继续工作。
 
-> 当前处于 **幼年期**，已实现 Win32/D3D12 首帧与可重编译 HLSL 三角形。真实进度、验证记录和下一步只在 [Docs/STATE.md](Docs/STATE.md) 维护。Editor / Runtime 共享实验路径；尚无 Editor UI、场景、网格/相机或 Render Graph。
+> 当前处于 **幼年期**，M2 已完成：Win32/D3D12、可重编译索引三角形、透视相机、共享参数与独立 CPU/GPU 计时。真实进度、验证记录和下一步只在 [Docs/STATE.md](Docs/STATE.md) 维护。Editor / Runtime 共享实验路径；尚无 Editor UI、场景、通用网格/资产系统、离屏 GPU 或 Render Graph。
 
 ## 接手入口
 
@@ -43,12 +43,18 @@ powershell -NoProfile -File tools/dev.ps1 verify -Configuration RelWithDebInfo
 .\out\build\windows-vs2022\bin\Debug\tinyme_editor.exe --windowed --shader shaders/Triangle.hlsl
 # M1 清屏回归，不编译 shader。
 .\out\build\windows-vs2022\bin\Debug\tinyme_runtime.exe --windowed --experiment clear --frames 8
+# 两入口共享参数/相机；输出路径必须是新文件，父目录必须存在。
+.\out\build\windows-vs2022\bin\Debug\tinyme_runtime.exe --windowed --camera-eye 0.25 0.125 -3 --camera-target 0.25 0.125 0 --fov 75 --scale 0.75 --tint 1 0.8 0.6 1 --profile --warmup 30 --samples 120 --report out/triangle-profile.json
 
 # 显式交互 GPU 验证，会短暂打开/缩放/最小化测试窗口。
 powershell -NoProfile -File tools/dev.ps1 gpu-test -Configuration Debug
 ```
 
 安装命令需要联网；后续构建和测试不下载依赖。无参数或 `--help` 显示帮助；`--version` 显示版本；无效参数返回 `2`。执行模式必须明确指定，`--headless` 与 `--windowed` 互斥；`--frames` 为 `1..1000000`。窗口未设帧数时持续运行，headless 默认 1 tick。
+
+三角形支持 `--scale 0.01..2`、`--tint R G B A`（各 `0..1`，均须有限）。`--profile` 默认有限运行 30 帧预热 + 120 样本，可由 `--warmup` / `--samples` 修改；显式帧数须覆盖预算。`--report` 不覆盖已有文件；省略时在 stdout 诊断日志之后输出 JSON。CPU 命令录制与 GPU clear/draw 独立统计，均不是整帧/FPS；重载、窗口变化、遮挡、提前关闭或丢样本使报告不完整并返回 `1`。契约与限制见 [ADR-0006](Docs/Decisions/ADR-0006-experiment-parameters-and-timing.md)。
+
+相机支持 `--camera-eye X Y Z`、`--camera-target X Y Z`（有限且各坐标在 `[-10000,10000]`）、`--fov 10..120`；默认左手透视，eye `(0,0,-2)`、target `(0,0,0)`、up `(0,1,0)`、FOV90、near0.1/far100。退化视向量拒绝；resize保持几何比例，scale仍作用于投影后clip.xy。当前仅固定索引三角形，无通用网格加载或深度缓冲；相机/资源契约见 [ADR-0007](Docs/Decisions/ADR-0007-indexed-triangle-and-camera.md)。
 
 Debug 窗口默认启用 D3D12 Debug Layer。优化构建使用 `--debug-layer` 或 `--gpu-validation` 显式验证；GBV 隐含 Debug Layer。所需 Graphics Tools 缺失时明确报错。默认 `verify` 不初始化 GPU；完整验收方法和限制见 `Docs/STATE.md`。
 
@@ -69,7 +75,7 @@ Debug 窗口默认启用 D3D12 Debug Layer。优化构建使用 `--debug-layer` 
 | `.codewiki/`（可选，尚未生成） | 可重建的仓库导览；不是规范与状态的权威来源 |
 | `out/`、`.tools/` | 忽略的构建产物、本地工具；不可作为知识源 |
 
-尚未实现的场景、网格/相机等模块按可验收切片添加，不提前堆放空接口。首个实验见 [EXP-0001](experiments/EXP-0001-triangle/README.md)。
+尚未实现的场景、通用网格/资产、离屏GPU等能力按可验收切片添加，不提前堆放空接口。首个实验见 [EXP-0001](experiments/EXP-0001-triangle/README.md)。
 
 ## 知识导航
 

@@ -1,24 +1,37 @@
+cbuffer TriangleParameters : register(b0)
+{
+    float4 Tint : packoffset(c0);
+    float Scale : packoffset(c1.x);
+    float3 Reserved : packoffset(c1.y);
+};
+
+cbuffer CameraTransform : register(b1)
+{
+    row_major float4x4 WorldToClip : packoffset(c0);
+};
+
+struct VertexInput
+{
+    float3 position : POSITION0;
+    float3 color : COLOR0;
+};
+
 struct VertexOutput
 {
     float4 position : SV_Position;
     float3 color : COLOR0;
 };
 
-VertexOutput VSMain(uint vertex_id : SV_VertexID)
+VertexOutput VSMain(VertexInput input)
 {
-    const float2 positions[3] = {
-        float2(0.0, 0.65), float2(0.65, -0.65), float2(-0.65, -0.65)
-    };
-    const float3 colors[3] = {
-        float3(1.0, 0.15, 0.15), float3(0.15, 1.0, 0.15), float3(0.15, 0.15, 1.0)
-    };
     VertexOutput output;
-    output.position = float4(positions[vertex_id], 0.0, 1.0);
-    output.color = colors[vertex_id];
+    output.position = mul(float4(input.position, 1.0), WorldToClip);
+    output.position.xy *= Scale;
+    output.color = input.color;
     return output;
 }
 
 float4 PSMain(VertexOutput input) : SV_Target0
 {
-    return float4(input.color, 1.0);
+    return float4(input.color, 1.0) * Tint;
 }

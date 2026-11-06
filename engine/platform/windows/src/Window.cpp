@@ -107,6 +107,11 @@ WindowSize Window::GetClientSize() const noexcept
     return size_;
 }
 
+std::uint64_t Window::GetSurfaceRevision() const noexcept
+{
+    return surface_revision_;
+}
+
 bool Window::IsMinimized() const noexcept
 {
     return minimized_;
@@ -208,11 +213,21 @@ LRESULT CALLBACK Window::WindowProcedure(HWND hwnd, UINT message, WPARAM wparam,
             }
             break;
         case WM_SIZE:
-            window->minimized_ = wparam == SIZE_MINIMIZED;
-            window->size_ = {LOWORD(lparam), HIWORD(lparam)};
+        {
+            const WindowSize size{LOWORD(lparam), HIWORD(lparam)};
+            const bool minimized = wparam == SIZE_MINIMIZED;
+            if (window->minimized_ != minimized || window->size_.width != size.width ||
+                window->size_.height != size.height)
+            {
+                ++window->surface_revision_;
+            }
+            window->minimized_ = minimized;
+            window->size_ = size;
             return 0;
+        }
         case WM_DPICHANGED:
         {
+            ++window->surface_revision_;
             const auto* rect = reinterpret_cast<const RECT*>(lparam);
             if (!SetWindowPos(hwnd, nullptr, rect->left, rect->top, rect->right - rect->left,
                               rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE))

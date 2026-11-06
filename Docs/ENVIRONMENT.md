@@ -59,9 +59,9 @@ DXC安装来源为微软官方NuGet，固定包/文件摘要由本次下载后�
 ## 4. 配置与排障入口
 
 - `Debug`：CPU 调试和契约检查。M1 引入后默认开启 D3D12 Debug Layer。
-- `RelWithDebInfo`：带符号优化构建；将来性能测量用此配置并记录 GPU 验证开关。
+- `RelWithDebInfo`：带符号优化构建；M2-002 已用此配置采集独立 CPU/GPU 实验基线，必须记录 GPU 验证开关，不能将验证开/关结果混报。
 - `out/build/windows-vs2022/`：生成项目；`bin/<Configuration>/`：可执行；`Testing/Temporary/LastTest.log`：最近 CTest 记录（会覆盖，不能作为唯一长期证据）。
-- `tools/dev.ps1` 支持 `doctor / configure / build / test / verify / gpu-test`。`verify` / `test` 先构建再跑默认 CPU CTest；`gpu-test` 在此基础上执行两种 GPU 生命周期验证和两入口严格窗口测试，需要交互桌面，不能在无桌面 runner 上声称通过。
+- `tools/dev.ps1` 支持 `doctor / configure / build / test / verify / gpu-test`。`verify` / `test` 先构建再跑默认无 GPU CTest；`gpu-test` 在此基础上执行两种 GPU 生命周期/参数/计时/中断验证和两入口严格窗口/报告测试，需要未遮挡的交互桌面，不能在无桌面 runner 上声称通过。
 - 可用 `-DTINYME_ENABLE_GPU_TESTS=ON` 在独立目录登记 GPU CTest；默认 OFF，避免普通验证弹窗。
 - 窗口为 1280×720 客户像素、VSYNC、SDR RGBA8；不是性能基准。`--windowed --frames N` 可限定成功呈现帧数；最小化/遮挡不消耗该预算。
 

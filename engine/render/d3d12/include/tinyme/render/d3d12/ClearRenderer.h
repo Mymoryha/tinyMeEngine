@@ -1,5 +1,7 @@
 #pragma once
 
+#include <tinyme/core/Camera.h>
+#include <tinyme/core/ExperimentParameters.h>
 #include <tinyme/platform/windows/Window.h>
 
 #include <array>
@@ -7,6 +9,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace tinyme
 {
@@ -14,6 +17,34 @@ struct RendererOptions
 {
     bool debug_layer = false;
     bool gpu_validation = false;
+    bool profiling = false;
+};
+
+struct FrameTiming
+{
+    std::uint64_t presentation = 0; // Zero denotes a submitted but occluded frame.
+    std::uint64_t pipeline_generation = 0;
+    WindowSize size;
+    double cpu_record_ms = 0.0;
+    double gpu_pass_ms = 0.0;
+};
+
+struct RendererInfo
+{
+    std::string adapter;
+    std::string driver;
+    std::uint64_t timestamp_frequency = 0;
+};
+
+struct TriangleGeometryInfo
+{
+    std::uint32_t vertex_count = 0;
+    std::uint32_t index_count = 0;
+    std::uint32_t vertex_stride = 0;
+    std::uint64_t upload_fence = 0;
+    std::uint64_t last_use_fence = 0;
+    bool resources_ready = false;
+    bool upload_pending = false;
 };
 
 struct ValidationStats
@@ -34,7 +65,14 @@ class ClearRenderer
     // Destructive resize failure faults the renderer; then only Shutdown() is allowed.
     void Resize(WindowSize size);
     // False means occluded: caller should wait for window messages before retrying.
-    [[nodiscard]] bool Render(const std::array<float, 4>& clear_color);
+    [[nodiscard]] bool Render(const std::array<float, 4>& clear_color,
+                              const TriangleParameters& parameters = {},
+                              const CameraParameters& camera = {});
+    [[nodiscard]] TriangleGeometryInfo GetTriangleGeometryInfo() const noexcept;
+    // Never waits. Call regularly; retained completed queue is bounded to 256 entries.
+    [[nodiscard]] std::vector<FrameTiming> TakeCompletedTimings();
+    [[nodiscard]] std::uint64_t GetDroppedTimingSamples() const noexcept;
+    [[nodiscard]] const RendererInfo& GetInfo() const noexcept;
     // Compile/confirmed shader-contract rejection keeps the previous pipeline.
     // Unknown API/GPU failures throw and fault the renderer; PSO classification needs Debug Layer.
     [[nodiscard]] bool ReloadTriangle(const std::filesystem::path& source,

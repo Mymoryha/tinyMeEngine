@@ -1,5 +1,6 @@
 #include <tinyme/render/d3d12/ClearRenderer.h>
 
+#include "GpuTimer.h"
 #include "ShaderCompiler.h"
 
 #include <d3d12.h>
@@ -8,7 +9,10 @@
 #include <dxgidebug.h>
 #include <wrl/client.h>
 
+#include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstring>
 #include <exception>
 #include <iostream>
 #include <limits>
@@ -25,6 +29,25 @@ namespace
 constexpr UINT kBufferCount = 2;
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DWORD kFenceTimeoutMs = 10000;
+struct TriangleVertex
+{
+    std::array<float, 3> position;
+    std::array<float, 3> color;
+};
+static_assert(sizeof(TriangleVertex) == 24 && offsetof(TriangleVertex, color) == 12);
+constexpr std::array<TriangleVertex, 4> kTriangleVertices{{
+    {{2.31111111F, -1.3F, 0.0F}, {0.15F, 1.0F, 0.15F}},
+    {{20.0F, 20.0F, 0.0F}, {0.0F, 0.0F, 0.0F}},
+    {{-2.31111111F, -1.3F, 0.0F}, {0.15F, 0.15F, 1.0F}},
+    {{0.0F, 1.3F, 0.0F}, {1.0F, 0.15F, 0.15F}},
+}};
+// The unreferenced vertex makes accidental non-indexed drawing observably incorrect.
+constexpr std::array<std::uint16_t, 3> kTriangleIndices{3, 0, 2};
+constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 2> kTriangleInput{{
+    {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+     0},
+    {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+}};
 
 std::string Hex(HRESULT value)
 {
@@ -74,7 +97,16 @@ struct ClearRenderer::Impl
     ComPtr<ID3D12GraphicsCommandList> commands;
     ComPtr<ID3D12RootSignature> root_signature;
     ComPtr<ID3D12PipelineState> triangle_pipeline;
+    ComPtr<ID3D12Resource> triangle_vertices;
+    ComPtr<ID3D12Resource> triangle_indices;
+    ComPtr<ID3D12Resource> triangle_upload;
+    D3D12_VERTEX_BUFFER_VIEW triangle_vertex_view{};
+    D3D12_INDEX_BUFFER_VIEW triangle_index_view{};
+    TriangleGeometryInfo geometry_info;
     std::uint64_t pipeline_generation = 0;
+    std::uint64_t presentations = 0;
+    RendererInfo renderer_info;
+    std::unique_ptr<GpuTimer> timer;
     ComPtr<ID3D12DescriptorHeap> rtv_heap;
     ComPtr<ID3D12Fence> fence;
     ComPtr<ID3D12InfoQueue> info_queue;
@@ -185,17 +217,20 @@ struct ClearRenderer::Impl
         Check(selected->GetDesc1(&description), "Selected adapter description");
         LARGE_INTEGER driver{};
         const auto driver_result = selected->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driver);
-        std::cout << "selected_adapter=\"" << Utf8(description.Description) << "\" driver=";
+        renderer_info.adapter = Utf8(description.Description);
+        std::ostringstream driver_text;
         if (SUCCEEDED(driver_result))
         {
-            std::cout << HIWORD(driver.HighPart) << '.' << LOWORD(driver.HighPart) << '.'
-                      << HIWORD(driver.LowPart) << '.' << LOWORD(driver.LowPart);
+            driver_text << HIWORD(driver.HighPart) << '.' << LOWORD(driver.HighPart) << '.'
+                        << HIWORD(driver.LowPart) << '.' << LOWORD(driver.LowPart);
         }
         else
         {
-            std::cout << "unavailable(" << Hex(driver_result) << ')';
+            driver_text << "unavailable(" << Hex(driver_result) << ')';
         }
-        std::cout << '\n';
+        renderer_info.driver = driver_text.str();
+        std::cout << "selected_adapter=\"" << renderer_info.adapter
+                  << "\" driver=" << renderer_info.driver << '\n';
         Check(D3D12CreateDevice(selected.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)),
               "D3D12CreateDevice(feature level 12.0)");
         if (options.debug_layer)
@@ -248,6 +283,12 @@ struct ClearRenderer::Impl
         Check(initial_swapchain.As(&swapchain), "IDXGISwapChain3");
         Check(factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER), "MakeWindowAssociation");
         CreateBuffers();
+        if (options.profiling)
+        {
+            timer = std::make_unique<GpuTimer>(device.Get(), queue.Get());
+            renderer_info.timestamp_frequency = timer->GetFrequency();
+            std::cout << "timestamp_frequency_hz=" << renderer_info.timestamp_frequency << '\n';
+        }
         std::cout << "renderer=d3d12 buffers=2 format=RGBA8_UNORM vsync=on debug_layer="
                   << options.debug_layer << " gpu_validation=" << options.gpu_validation << '\n';
         CheckDiagnostics();
@@ -383,7 +424,18 @@ struct ClearRenderer::Impl
         ComPtr<ID3D12PipelineState> candidate_pipeline;
         try
         {
+            std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
+            parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+            parameters[0].Constants.ShaderRegister = 0;
+            parameters[0].Constants.Num32BitValues = kTriangleParameterDwords;
+            parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+            parameters[1].Constants.ShaderRegister = 1;
+            parameters[1].Constants.Num32BitValues = sizeof(CameraTransform) / sizeof(float);
+            parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
             D3D12_ROOT_SIGNATURE_DESC root_desc{};
+            root_desc.NumParameters = static_cast<UINT>(parameters.size());
+            root_desc.pParameters = parameters.data();
             root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
             ComPtr<ID3DBlob> root_blob, root_errors;
             Check(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob,
@@ -397,6 +449,7 @@ struct ClearRenderer::Impl
             desc.pRootSignature = candidate_root.Get();
             desc.VS = {vertex.bytecode.data(), vertex.bytecode.size()};
             desc.PS = {pixel.bytecode.data(), pixel.bytecode.size()};
+            desc.InputLayout = {kTriangleInput.data(), static_cast<UINT>(kTriangleInput.size())};
             desc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
             desc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
             desc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
@@ -444,6 +497,10 @@ struct ClearRenderer::Impl
                             D3D12_MESSAGE_ID_CREATEGRAPHICSPIPELINESTATE_VS_ROOT_SIGNATURE_MISMATCH ||
                         message->ID ==
                             D3D12_MESSAGE_ID_CREATEGRAPHICSPIPELINESTATE_PS_ROOT_SIGNATURE_MISMATCH ||
+                        message->ID == D3D12_MESSAGE_ID_CREATEINPUTLAYOUT_MISSINGELEMENT ||
+                        message->ID == D3D12_MESSAGE_ID_CREATEINPUTLAYOUT_TYPE_MISMATCH ||
+                        message->ID ==
+                            D3D12_MESSAGE_ID_CREATEGRAPHICSPIPELINESTATE_INPUTLAYOUT_SHADER_MISMATCH ||
                         (message->ID >=
                              D3D12_MESSAGE_ID_CREATEGRAPHICSPIPELINESTATE_SHADER_LINKAGE_REGISTERINDEX &&
                          message->ID <=
@@ -467,12 +524,94 @@ struct ClearRenderer::Impl
             faulted = false;
             return false;
         }
+        if (!geometry_info.resources_ready)
+        {
+            CreateTriangleGeometry();
+        }
         CheckDiagnostics();
         root_signature = std::move(candidate_root);
         triangle_pipeline = std::move(candidate_pipeline);
         ++pipeline_generation;
         faulted = false;
         return true;
+    }
+
+    void CreateTriangleGeometry()
+    {
+        const auto create_buffer = [&](UINT64 bytes, D3D12_HEAP_TYPE heap_type,
+                                       D3D12_RESOURCE_STATES state,
+                                       ComPtr<ID3D12Resource>& resource, const wchar_t* name)
+        {
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = heap_type;
+            heap.CreationNodeMask = 1;
+            heap.VisibleNodeMask = 1;
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            desc.Width = bytes;
+            desc.Height = 1;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            CheckDevice(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
+                                                        nullptr, IID_PPV_ARGS(&resource)),
+                        "Create triangle buffer");
+            Check(resource->SetName(name), "Triangle resource name");
+        };
+        constexpr UINT vertex_bytes = sizeof(kTriangleVertices);
+        constexpr UINT index_bytes = sizeof(kTriangleIndices);
+        create_buffer(vertex_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON,
+                      triangle_vertices, L"TinyMe.Triangle.Vertices");
+        create_buffer(index_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON,
+                      triangle_indices, L"TinyMe.Triangle.Indices");
+        create_buffer(vertex_bytes + index_bytes, D3D12_HEAP_TYPE_UPLOAD,
+                      D3D12_RESOURCE_STATE_GENERIC_READ, triangle_upload,
+                      L"TinyMe.Triangle.Upload");
+        geometry_info.upload_pending = true;
+        void* mapped = nullptr;
+        const D3D12_RANGE no_read{0, 0};
+        CheckDevice(triangle_upload->Map(0, &no_read, &mapped), "Triangle upload Map");
+        std::memcpy(mapped, kTriangleVertices.data(), vertex_bytes);
+        std::memcpy(static_cast<unsigned char*>(mapped) + vertex_bytes, kTriangleIndices.data(),
+                    index_bytes);
+        const D3D12_RANGE written{0, vertex_bytes + index_bytes};
+        triangle_upload->Unmap(0, &written);
+        CheckDevice(frames[0].allocator->Reset(), "Triangle upload allocator Reset");
+        CheckDevice(commands->Reset(frames[0].allocator.Get(), nullptr),
+                    "Triangle upload list Reset");
+        std::array<D3D12_RESOURCE_BARRIER, 2> barriers{};
+        barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[0].Transition = {triangle_vertices.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                  D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST};
+        barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[1].Transition = {triangle_indices.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                  D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST};
+        commands->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        commands->CopyBufferRegion(triangle_vertices.Get(), 0, triangle_upload.Get(), 0,
+                                   vertex_bytes);
+        commands->CopyBufferRegion(triangle_indices.Get(), 0, triangle_upload.Get(), vertex_bytes,
+                                   index_bytes);
+        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_INDEX_BUFFER;
+        commands->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        CheckDevice(commands->Close(), "Triangle upload list Close");
+        ID3D12CommandList* submitted[]{commands.Get()};
+        queue->ExecuteCommandLists(1, submitted);
+        geometry_info.upload_fence = Signal();
+        WaitForFence(geometry_info.upload_fence);
+        triangle_upload.Reset();
+        geometry_info.upload_pending = false;
+        triangle_vertex_view = {triangle_vertices->GetGPUVirtualAddress(), vertex_bytes,
+                                sizeof(TriangleVertex)};
+        triangle_index_view = {triangle_indices->GetGPUVirtualAddress(), index_bytes,
+                               DXGI_FORMAT_R16_UINT};
+        geometry_info.vertex_count = static_cast<std::uint32_t>(kTriangleVertices.size());
+        geometry_info.index_count = static_cast<std::uint32_t>(kTriangleIndices.size());
+        geometry_info.vertex_stride = sizeof(TriangleVertex);
+        geometry_info.resources_ready = true;
     }
 
     void CreateBuffers()
@@ -579,7 +718,8 @@ struct ClearRenderer::Impl
         faulted = false;
     }
 
-    bool Render(const std::array<float, 4>& clear_color)
+    bool Render(const std::array<float, 4>& clear_color, const TriangleParameters& parameters,
+                const CameraParameters& camera)
     {
         if (stopped || faulted)
         {
@@ -591,6 +731,20 @@ struct ClearRenderer::Impl
             {
                 throw std::invalid_argument("Clear color must be finite.");
             }
+        }
+        if (!IsValid(parameters))
+        {
+            throw std::invalid_argument("Invalid triangle parameter layout/values.");
+        }
+        if (!IsValid(camera))
+        {
+            throw std::invalid_argument("Invalid camera parameters.");
+        }
+        CameraTransform transform;
+        if (triangle_pipeline)
+        {
+            transform = BuildCameraTransform(camera, static_cast<float>(size.width) /
+                                                         static_cast<float>(size.height));
         }
         faulted = true;
         if (occluded)
@@ -607,6 +761,11 @@ struct ClearRenderer::Impl
         const auto index = swapchain->GetCurrentBackBufferIndex();
         auto& frame = frames[index];
         WaitForFence(frame.last_fence);
+        if (timer)
+        {
+            timer->Poll(fence->GetCompletedValue());
+        }
+        const auto record_start = std::chrono::steady_clock::now();
         CheckDevice(frame.allocator->Reset(), "Allocator Reset");
         CheckDevice(commands->Reset(frame.allocator.Get(), nullptr), "Command list Reset");
         D3D12_RESOURCE_BARRIER barrier{};
@@ -618,6 +777,10 @@ struct ClearRenderer::Impl
         commands->ResourceBarrier(1, &barrier);
         auto handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
         handle.ptr += static_cast<SIZE_T>(index) * rtv_stride;
+        if (timer)
+        {
+            timer->Begin(index, commands.Get());
+        }
         commands->ClearRenderTargetView(handle, clear_color.data(), 0, nullptr);
         if (triangle_pipeline)
         {
@@ -630,19 +793,45 @@ struct ClearRenderer::Impl
             commands->RSSetScissorRects(1, &scissor);
             commands->OMSetRenderTargets(1, &handle, FALSE, nullptr);
             commands->SetGraphicsRootSignature(root_signature.Get());
+            commands->SetGraphicsRoot32BitConstants(0, kTriangleParameterDwords, &parameters, 0);
+            commands->SetGraphicsRoot32BitConstants(1, sizeof(CameraTransform) / sizeof(float),
+                                                    transform.world_to_clip.data(), 0);
             commands->SetPipelineState(triangle_pipeline.Get());
             commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            commands->DrawInstanced(3, 1, 0, 0);
+            commands->IASetVertexBuffers(0, 1, &triangle_vertex_view);
+            commands->IASetIndexBuffer(&triangle_index_view);
+            commands->DrawIndexedInstanced(geometry_info.index_count, 1, 0, 0, 0);
+        }
+        if (timer)
+        {
+            timer->End(index, commands.Get());
         }
         std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
         commands->ResourceBarrier(1, &barrier);
         CheckDevice(commands->Close(), "Command list Close");
+        const auto cpu_record_ms = std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - record_start)
+                                       .count();
         ID3D12CommandList* submitted[]{commands.Get()};
         queue->ExecuteCommandLists(1, submitted);
         const auto present_result = swapchain->Present(1, 0);
         frame.last_fence = Signal();
+        if (triangle_pipeline)
+        {
+            geometry_info.last_use_fence = frame.last_fence;
+        }
         CheckDevice(present_result, "Present");
         occluded = present_result == DXGI_STATUS_OCCLUDED;
+        if (!occluded)
+        {
+            ++presentations;
+        }
+        if (timer)
+        {
+            timer->Submitted(
+                index, frame.last_fence,
+                {occluded ? 0 : presentations, pipeline_generation, size, cpu_record_ms, 0.0});
+        }
         CheckDiagnostics();
         faulted = false;
         return !occluded;
@@ -670,9 +859,32 @@ struct ClearRenderer::Impl
             device_removed = true;
             failure = std::current_exception();
         }
+        if (timer)
+        {
+            try
+            {
+                if (!device_removed)
+                {
+                    timer->Poll(fence->GetCompletedValue());
+                }
+            }
+            catch (...)
+            {
+                if (!failure)
+                {
+                    failure = std::current_exception();
+                }
+            }
+            timer->ReleaseResources();
+        }
         commands.Reset();
         triangle_pipeline.Reset();
         root_signature.Reset();
+        triangle_upload.Reset();
+        triangle_indices.Reset();
+        triangle_vertices.Reset();
+        geometry_info.resources_ready = false;
+        geometry_info.upload_pending = false;
         for (auto& frame : frames)
         {
             frame.buffer.Reset();
@@ -748,9 +960,46 @@ void ClearRenderer::Resize(WindowSize size)
     impl_->Resize(size);
 }
 
-bool ClearRenderer::Render(const std::array<float, 4>& clear_color)
+bool ClearRenderer::Render(const std::array<float, 4>& clear_color,
+                           const TriangleParameters& parameters, const CameraParameters& camera)
 {
-    return impl_->Render(clear_color);
+    return impl_->Render(clear_color, parameters, camera);
+}
+
+TriangleGeometryInfo ClearRenderer::GetTriangleGeometryInfo() const noexcept
+{
+    return impl_->geometry_info;
+}
+
+std::vector<FrameTiming> ClearRenderer::TakeCompletedTimings()
+{
+    if (!impl_->timer)
+    {
+        return {};
+    }
+    if (!impl_->shutdown_complete)
+    {
+        try
+        {
+            impl_->timer->Poll(impl_->fence->GetCompletedValue());
+        }
+        catch (...)
+        {
+            impl_->faulted = true;
+            throw;
+        }
+    }
+    return impl_->timer->TakeCompleted();
+}
+
+std::uint64_t ClearRenderer::GetDroppedTimingSamples() const noexcept
+{
+    return impl_->timer ? impl_->timer->GetDroppedSamples() : 0;
+}
+
+const RendererInfo& ClearRenderer::GetInfo() const noexcept
+{
+    return impl_->renderer_info;
 }
 
 void ClearRenderer::Shutdown()

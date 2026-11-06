@@ -1,5 +1,8 @@
 #pragma once
 
+#include <tinyme/core/Camera.h>
+#include <tinyme/core/ExperimentParameters.h>
+
 #include <cstdint>
 #include <span>
 #include <string>
@@ -32,6 +35,10 @@ struct LaunchOptions
     bool gpu_validation = false;
     std::string experiment = "triangle";
     std::string shader_path;
+    TriangleParameters parameters;
+    CameraParameters camera;
+    ProfileOptions profile;
+    std::string report_path;
 };
 
 struct ParseResult

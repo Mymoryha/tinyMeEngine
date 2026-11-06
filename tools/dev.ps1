@@ -93,6 +93,7 @@ try {
                     $program = Join-Path $root "out\build\windows-vs2022\bin\$Configuration\$app.exe"
                     if (Test-Path $program) {
                         Invoke-Native $cmake @("-DPROGRAM=$program", '-P', (Join-Path $root 'tests\CheckWindowCli.cmake'))
+                        Invoke-Native $cmake @("-DPROGRAM=$program", '-P', (Join-Path $root 'tests\CheckProfileCli.cmake'))
                     }
                 }
             }

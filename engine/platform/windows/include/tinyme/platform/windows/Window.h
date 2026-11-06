@@ -33,6 +33,8 @@ class Window
     [[nodiscard]] bool IsMinimized() const noexcept;
     [[nodiscard]] bool IsCloseRequested() const noexcept;
     [[nodiscard]] UINT GetDpi() const noexcept;
+    // Retains resize/minimize/DPI transitions even when one message pump restores the old state.
+    [[nodiscard]] std::uint64_t GetSurfaceRevision() const noexcept;
     void PumpMessages();
     void WaitForMessages(DWORD timeout_ms) const;
     void SetClientSize(WindowSize size);
@@ -50,6 +52,7 @@ class Window
     HWND hwnd_ = nullptr;
     DPI_AWARENESS_CONTEXT previous_dpi_ = nullptr;
     WindowSize size_;
+    std::uint64_t surface_revision_ = 0;
     bool owns_class_ = false;
     bool minimized_ = false;
     bool close_requested_ = false;

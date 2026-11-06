@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.31.10)
-project(TinyMeEngine VERSION 0.3.0 LANGUAGES CXX)
+project(TinyMeEngine VERSION 0.5.0 LANGUAGES CXX)
 include(cmake/Dxc.cmake)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -36,7 +36,8 @@ configure_file(
     @ONLY
 )
 
-add_library(tinyme_core STATIC engine/core/src/LaunchOptions.cpp)
+add_library(tinyme_core STATIC engine/core/src/LaunchOptions.cpp engine/core/src/TimingStatistics.cpp
+    engine/core/src/Camera.cpp)
 add_library(TinyMe::Core ALIAS tinyme_core)
 target_include_directories(tinyme_core PUBLIC
     engine/core/include
@@ -57,15 +58,16 @@ tinyme_configure_target(tinyme_windows)
 
 add_library(tinyme_d3d12 STATIC
     engine/render/d3d12/src/ClearRenderer.cpp
-    engine/render/d3d12/src/ShaderCompiler.cpp)
+    engine/render/d3d12/src/ShaderCompiler.cpp
+    engine/render/d3d12/src/GpuTimer.cpp)
 target_include_directories(tinyme_d3d12 PUBLIC engine/render/d3d12/include
     PRIVATE "${tinyme_dxc_root}/build/native/include")
-target_link_libraries(tinyme_d3d12 PUBLIC tinyme_windows PRIVATE d3d12 dxgi dxguid)
+target_link_libraries(tinyme_d3d12 PUBLIC tinyme_windows TinyMe::Core PRIVATE d3d12 dxgi dxguid)
 tinyme_configure_target(tinyme_d3d12)
 
-add_library(tinyme_windowed_runtime STATIC engine/runtime/src/WindowedSession.cpp)
+add_library(tinyme_windowed_runtime STATIC engine/runtime/src/WindowedSession.cpp engine/runtime/src/ProfileReport.cpp)
 target_include_directories(tinyme_windowed_runtime PUBLIC engine/runtime/include)
-target_link_libraries(tinyme_windowed_runtime PRIVATE tinyme_d3d12 TinyMe::Runtime)
+target_link_libraries(tinyme_windowed_runtime PUBLIC TinyMe::Core PRIVATE tinyme_d3d12 TinyMe::Runtime)
 tinyme_configure_target(tinyme_windowed_runtime)
 
 add_library(tinyme_app_host STATIC apps/common/Application.cpp)
@@ -105,6 +107,12 @@ if(BUILD_TESTING)
     add_test(NAME core.contracts COMMAND tinyme_tests)
     set_tests_properties(core.contracts PROPERTIES TIMEOUT 15)
 
+    add_executable(tinyme_camera_tests tests/CameraTests.cpp)
+    target_link_libraries(tinyme_camera_tests PRIVATE TinyMe::Core)
+    tinyme_configure_target(tinyme_camera_tests)
+    add_test(NAME camera.contracts COMMAND tinyme_camera_tests)
+    set_tests_properties(camera.contracts PROPERTIES TIMEOUT 15)
+
     add_executable(tinyme_shader_tests tests/ShaderTests.cpp)
     target_include_directories(tinyme_shader_tests PRIVATE engine/render/d3d12/src)
     target_link_libraries(tinyme_shader_tests PRIVATE tinyme_d3d12)
@@ -113,8 +121,15 @@ if(BUILD_TESTING)
     add_test(NAME shader.compiler COMMAND tinyme_shader_tests)
     set_tests_properties(shader.compiler PROPERTIES TIMEOUT 30)
 
+    add_executable(tinyme_profile_tests tests/ProfileTests.cpp)
+    target_include_directories(tinyme_profile_tests PRIVATE engine/runtime/src)
+    target_link_libraries(tinyme_profile_tests PRIVATE tinyme_windowed_runtime tinyme_d3d12)
+    tinyme_configure_target(tinyme_profile_tests)
+    add_test(NAME profile.contracts COMMAND tinyme_profile_tests)
+    set_tests_properties(profile.contracts PROPERTIES TIMEOUT 15)
+
     add_executable(tinyme_gpu_tests tests/GpuTests.cpp)
-    target_link_libraries(tinyme_gpu_tests PRIVATE tinyme_d3d12)
+    target_link_libraries(tinyme_gpu_tests PRIVATE tinyme_d3d12 tinyme_windowed_runtime gdi32 dwmapi)
     tinyme_configure_target(tinyme_gpu_tests)
     tinyme_deploy_shader(tinyme_gpu_tests)
     option(TINYME_ENABLE_GPU_TESTS "Run interactive RTX 5080 GPU tests in CTest" OFF)
@@ -135,7 +150,12 @@ if(BUILD_TESTING)
                 duplicate_headless duplicate_frames conflicting_help conflicting_modes
                 duplicate_windowed headless_debug headless_gbv duplicate_debug
                 duplicate_gbv windowed_zero windowed_unknown headless_experiment
-                headless_shader unknown_experiment missing_shader duplicate_shader clear_shader)
+                headless_shader unknown_experiment missing_shader duplicate_shader clear_shader
+                headless_profile headless_scale invalid_scale invalid_tint missing_tint
+                duplicate_scale clear_parameters samples_without_profile zero_samples
+                excessive_warmup insufficient_profile_frames duplicate_profile missing_report
+                duplicate_report headless_camera clear_camera invalid_fov missing_camera
+                duplicate_camera degenerate_camera)
             set(test_name "${app}.${case}")
             add_test(NAME "${test_name}" COMMAND "${CMAKE_COMMAND}"
                 "-DPROGRAM=$<TARGET_FILE:${app}>"
@@ -150,6 +170,10 @@ if(BUILD_TESTING)
                 "-DPROGRAM=$<TARGET_FILE:${app}>"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/CheckWindowCli.cmake")
             set_tests_properties("${app}.windowed" PROPERTIES LABELS "GPU" RUN_SERIAL TRUE TIMEOUT 45)
+            add_test(NAME "${app}.profile" COMMAND "${CMAKE_COMMAND}"
+                "-DPROGRAM=$<TARGET_FILE:${app}>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/CheckProfileCli.cmake")
+            set_tests_properties("${app}.profile" PROPERTIES LABELS "GPU" RUN_SERIAL TRUE TIMEOUT 90)
         endif()
     endforeach()
 endif()

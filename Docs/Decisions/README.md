@@ -9,5 +9,7 @@
 | [ADR-0003](ADR-0003-knowledge-and-handoff.md) | Accepted | 仓库知识单一来源，任务/决策/历史分工 | 同步维护成本超过实际收益或引入外部任务平台 |
 | [ADR-0004](ADR-0004-window-and-gpu-lifetime.md) | Accepted | 独立窗口 Runtime、逐帧 fence、延后关闭与故障拆卸 | 多窗口、离屏 GPU 或设备恢复需求 |
 | [ADR-0005](ADR-0005-dxc-and-transactional-shader-reload.md) | Accepted | 固定 DXC、主文件快照、事务 PSO 与人工 F5 | 第二个资源契约、编译停顿或多文件一致性需求 |
+| [ADR-0006](ADR-0006-experiment-parameters-and-timing.md) | Accepted | 32 字节 root constants、独立 CPU/GPU 范围、fence-safe 采样与报告完整性 | 更大/不同参数、多个 pass/queue 或持续后台采样 |
+| [ADR-0007](ADR-0007-indexed-triangle-and-camera.md) | Accepted | 静态DEFAULT VB/IB、初始化上传fence、row-major左手相机与矩阵root constants | 第二个网格、动态上传、模型变换、深度测试或参数增长 |
 
 新增文档使用 `ADR-XXXX-short-topic.md`，包含：日期、状态、关联任务、背景、选项、决定、代价、验证、重审触发。替代决定必须双向链接，不覆盖旧结论。

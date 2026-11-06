@@ -1,22 +1,25 @@
 # 架构与契约
 
-## 1. 已实现结构（M2-001）
+## 1. 已实现结构（M2-003）
 
 依赖箭头从使用者指向被使用者；本节只描述真实代码。
 
 ```text
-apps/editor ──┐                      ┌── tinyme_core（CLI）
+apps/editor ──┐                      ┌── tinyme_core（CLI / 参数 / 统计）
              ├── tinyme_app_host ────┼── tinyme_runtime（纯逻辑 Session）
 apps/runtime ┘                      └── tinyme_windowed_runtime
+                                           ├── tinyme_core
                                            ├── tinyme_runtime
                                            └── tinyme_d3d12 ──→ tinyme_windows
+                                                   └── tinyme_core
 
-CPU tests ── tinyme_core + tinyme_runtime
-GPU tests ── tinyme_d3d12 + tinyme_windows
+Core tests ── tinyme_core + tinyme_runtime
+Report tests ── tinyme_windowed_runtime + tinyme_d3d12（不创建 GPU）
+GPU tests ── tinyme_d3d12 + tinyme_windows + tinyme_windowed_runtime
 ```
 
 - 两个应用保留 console 子系统，CLI 的 stdout/stderr 与退出码可被脚本捕获；不是仅能通过 GUI 启动的程序。
-- `Session` 仍只拥有逻辑 tick/模拟时间，不依赖窗口、GPU、Editor。`WindowedSession` 是单独的组合实现，不把 GPU 依赖带入 CPU 测试 target。
+- `Session` 仍只拥有逻辑 tick/模拟时间，不依赖窗口、GPU、Editor。`WindowedSession` 是单独的组合实现，不把 GPU 依赖带入 Core 测试 target；报告测试链接窗口组合但只执行纯序列化、文件与窗口创建前失败路径。
 - `tinyme_windows` 拥有一个 Win32 HWND；`tinyme_d3d12` 是具体清屏/三角形实现，通过 PImpl 隐藏 COM 细节，不是通用 RHI。
 - `RunWindowedSession` 位于 Runtime 层，依次构造 Window → Renderer → Session。显式 Renderer Shutdown 后才允许 Window 析构。
 - 无参数显示帮助；`--headless` 保持无窗口/无 GPU，默认 1 个逻辑 tick；`--windowed` 运行 GPU 窗口，默认持续到关闭/Escape。模式互斥。
@@ -28,7 +31,7 @@ GPU tests ── tinyme_d3d12 + tinyme_windows
 - `ClearRenderer` 保留清屏生命周期并可选执行三角形，明确 clear → draw → present；shader内部编译器返回自有字节码。F5在Runtime线程人工重编译，候选PSO通过GPU同步/诊断后原子提交，失败保留上一个generation。
 - 两程序使用wmain和UTF-8内部参数解析，中文路径通过C++20 char8_t恢复Windows路径；stdout/stderr契约不变。
 - 默认测试新增shader.compiler：实际DXC但无GPU。Core测试仍只链接Core/逻辑Runtime；shader测试链接渲染模块但不创建device/窗口。
-- 主HLSL文件4MiB预算、两阶段共享快照；include即时读取，不承诺完整依赖图快照。尚无离屏GPU、场景、Editor UI、网格/相机或Render Graph。
+- 主HLSL文件4MiB预算、两阶段共享快照；include即时读取，不承诺完整依赖图快照。已有固定索引几何与透视相机，尚无通用网格/资产加载、深度附件、离屏GPU、场景、Editor UI或Render Graph。
 
 生命周期取舍见 [ADR-0004](Decisions/ADR-0004-window-and-gpu-lifetime.md)，编译/重载取舍见 [ADR-0005](Decisions/ADR-0005-dxc-and-transactional-shader-reload.md)。
 
@@ -87,3 +90,24 @@ Core ← 被必要的上层模块复用；不反向依赖任何模块
 未来物理可以成为更新阶段的独立模块，通过场景数据和资源契约交互；现在不加入空 `IPhysicsWorld`。资产系统、序列化、ECS、异步编译、后台导入、热重载基础设施均由实验需求驱动。
 
 重构触发条件：第二个实验被迫复制基础代码、跨层依赖增加、资源所有权无法说明、修改 pass 需要触碰不相关入口。触发后记录 ADR 和迁移/验证办法，先减耦合，不直接升级为大框架。
+
+## 7. 实验参数与测量（M2-002 已实现）
+
+- `TriangleParameters` 的唯一 CPU 布局在 Core；HLSL b0 两个 register 对应 32 字节/16 对齐，八个 root constants 在每次 Render 录制时复制。默认保持原图；scale 是 clip-space XY 无量纲缩放，tint 是 RGBA 乘数。Renderer 提交前验证，clear 不使用此参数。当前仍是不透明混合，不支持透明合成。
+- CLI 与 Runtime 共享参数/profile 配置。`--profile` 创建 D3D12 内部 `GpuTimer`，不构建通用 Profiler；关闭时无 query/readback 资源。CPU 仅命令录制，GPU 仅 clear + optional draw，两个值都不是整帧时间。
+- 两 frame slots 的 query/readback 区间各不重叠，提交绑定最后 fence、尺寸、generation、成功呈现编号。正常领取只查 completed fence，既有 frame context 安全复用前读取旧值；不新增 WaitIdle 或同步回读。退出沿既有安全点收尾，释放 GPU 计时资源后验证 live child。
+- Runtime 筛选预热/目标样本并检查环境；Window surface revision 保留尺寸/最小化/DPI 的瞬时变化。F5请求、遮挡、窗口变化、提前关闭、验证 warning 或队列丢样本都不能冒称完整测量。clear 可独立测量，但编译器字段为 null、参数未应用。
+- `ProfileReport` 是窗口 Runtime 内部模块：UTF-8 JSON、设备/驱动/构建与验证开关、原始样本、独立统计、完整性原因；不覆盖输出文件。未指定 report 路径时 stdout 先有日志，再输出 JSON；需要机器解析的完整文件使用 `--report`。
+
+数据布局、准确起止范围、失败文件行为和重审条件见 [ADR-0006](Decisions/ADR-0006-experiment-parameters-and-timing.md)，实际验证及未测项见 STATE。
+
+## 8. 索引几何与相机（M2-003 已实现）
+
+- 渲染目标仍只有clear或固定triangle，不增加Scene、资产系统或通用Mesh API。Renderer拥有POSITION/COLOR各float3的24字节VB和R16_UINT IB，四顶点/三索引；额外未引用离屏顶点使错误非索引draw不能混过原画面验收。
+- 首次有效候选PSO后，在已有WaitIdle边界创建DEFAULT资源和一次UPLOAD staging，以COMMON初态创建buffer，录制COMMON→COPY_DEST、copy与COPY_DEST→VB/IB状态转换，Signal后等待upload fence完成才释放staging。上传不Present、不增加sample/generation；staging为Renderer成员，Signal/等待失败时交由安全Shutdown处理，不能在局部栈展开时提前释放。F5与resize复用网格；最后索引draw的fence明确记录。
+- b0仍32字节八DWORD，b1新增VS-only十六DWORD相机矩阵，两个契约每次录制完整复制；根签名共24DWORD，不需要共享mapped CB。HLSL显式row_major，行向量mul(position,WorldToClip)，Core构造左手View*Projection与[0,1]深度，不隐式转置。
+- CameraParameters是无OS/GPU依赖的数据：eye/target/up、vertical FOV、near/far。Renderer在GPU副作用及CPU录制计时前验证/构造矩阵，实际客户区aspect随resize重算。默认eye0/0/-2、target0/0/0、up0/1/0、FOV90、near0.1/far100；16:9保留历史默认三角形。scale依然作用于投影后clip.xy，tint仍不启用alpha混合。
+- Runtime和两入口共享--camera-eye/--camera-target/--fov；headless与clear拒绝显式相机选项。报告保留b0 parameter_bytes=32，另列实际几何和fence、相机输入、64字节row-major矩阵；clear为null。初始化上传与CPU相机数学不计入原CPU/GPU采样范围。
+- 输入签名不兼容仅消费明确的Debug Layer候选拒绝消息，未知API/设备错误仍faulted；真正未绑定资源测试使用b2。新增资源沿已有WaitIdle/设备移除规则释放，live child在释放后检查。
+
+取舍与重审触发见 [ADR-0007](Decisions/ADR-0007-indexed-triangle-and-camera.md)。M2-003双配置、Editor OFF、GPU/GBV及像素/矩阵验收已完成，证据见STATE与EXP-0001；这里只支持固定索引三角形与最小相机，不等于通用网格/场景系统。

@@ -44,6 +44,15 @@ int RunApplication(ApplicationKind kind, int argc, wchar_t* argv[])
                 << "M2: D3D12 triangle + pinned DXC; F5 recompiles shader, Escape closes.\n"
                 << "--experiment triangle|clear: windowed only, default triangle.\n"
                 << "--shader PATH: triangle source; default executable/shaders/Triangle.hlsl.\n"
+                << "--scale [0.01,2] / --tint R G B A [0,1]: finite triangle parameters.\n"
+                << "--camera-eye X Y Z / --camera-target X Y Z / --fov [10,120]: triangle only.\n"
+                << "Camera: left-handed perspective, default eye 0,0,-2 target 0,0,0 FOV 90.\n"
+                << "--profile [--warmup N] [--samples N] [--report NEW.json]: windowed only.\n"
+                << "Profile defaults: 30 warmup + 120 samples; auto frame budget unless --frames "
+                   "set.\n"
+                << "Samples/warmup max 100000; samples >=1. Reports never overwrite existing "
+                   "files.\n"
+                << "CPU record and GPU clear/draw timestamps exclude present/VSYNC and reload.\n"
                 << "--headless: no window/GPU, default 1 logical tick.\n"
                 << "--windowed: RTX 5080 window, runs until close/Escape unless --frames is set.\n"
                 << "--frames N: [1, 1000000]; logical ticks for headless, presentations for "
@@ -72,15 +81,38 @@ int RunApplication(ApplicationKind kind, int argc, wchar_t* argv[])
             {
                 shader_path.push_back(static_cast<char8_t>(character));
             }
-            const WindowedRunOptions options{
-                parsed.options.has_frame_limit ? parsed.options.frame_count : 0,
-                parsed.options.debug_layer, parsed.options.gpu_validation,
-                parsed.options.experiment == "triangle", std::filesystem::path(shader_path)};
+            std::u8string report_path;
+            for (const auto character : parsed.options.report_path)
+            {
+                report_path.push_back(static_cast<char8_t>(character));
+            }
+            WindowedRunOptions options;
+            options.frame_limit = parsed.options.has_frame_limit ? parsed.options.frame_count : 0;
+            options.debug_layer = parsed.options.debug_layer;
+            options.gpu_validation = parsed.options.gpu_validation;
+            options.triangle = parsed.options.experiment == "triangle";
+            options.shader_path = std::filesystem::path(shader_path);
+            options.parameters = parsed.options.parameters;
+            options.camera = parsed.options.camera;
+            options.profile = parsed.options.profile;
+            options.report_path = std::filesystem::path(report_path);
             const auto result = RunWindowedSession(title, options);
             std::cout << name << " mode=windowed-gpu presented_frames=" << result.presented_frames
                       << " closed_by_user=" << result.closed_by_user
                       << " validation_warnings=" << result.validation_warnings << '\n'
                       << std::flush;
+            if (options.profile.enabled)
+            {
+                if (options.report_path.empty())
+                {
+                    std::cout << result.profile_json << std::flush;
+                }
+                if (!result.profile_complete)
+                {
+                    std::cerr << "error: Profile incomplete or environment changed; see report.\n";
+                    return 1;
+                }
+            }
             return 0;
         }
 
