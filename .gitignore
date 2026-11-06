@@ -1,0 +1,11 @@
+/out/
+/.tools/
+/.vs/
+/.idea/
+/CMakeUserPresets.json
+/compile_commands.json
+/.codewiki/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb

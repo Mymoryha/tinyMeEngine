@@ -1,0 +1,8 @@
+#pragma once
+
+#include <string_view>
+
+namespace tinyme
+{
+inline constexpr std::string_view kVersion = "@PROJECT_VERSION@";
+}
